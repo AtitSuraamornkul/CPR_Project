@@ -1,13 +1,13 @@
 def move(robot, grid_size):
     x, y = robot.position
-    if robot.direction == 'N' and y+1 < grid_size:
-        robot.position = (x, y+1)
-    elif robot.direction == 'S' and y-1 >= 0:
-        robot.position = (x, y-1)
-    elif robot.direction == 'E' and x+1 < grid_size:
-        robot.position = (x+1, y)
-    elif robot.direction == 'W' and x-1 >= 0:
+    if robot.direction == 'N' and x-1 >= 0:
         robot.position = (x-1, y)
+    elif robot.direction == 'S' and x+1 < grid_size:
+        robot.position = (x+1, y)
+    elif robot.direction == 'E' and y+1 < grid_size:
+        robot.position = (x, y+1)
+    elif robot.direction == 'W' and y-1 >= 0:
+        robot.position = (x, y-1)
 
 def turn(robot, direction):
     dirs = ['N','E','S','W']

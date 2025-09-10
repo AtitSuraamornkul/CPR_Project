@@ -64,7 +64,7 @@ class Simulation:
     def _print_grid(self):
         """Print a visual representation of the grid"""
         print("\nGrid View:")
-        print("Legend: R1=Group1 Robot, R2=Group2 Robot, R1*=Carrying Gold, R1!=Gold Alone, →=North, ←=South, ↓=East, ↑=West, G=Gold, D1=Group1 Deposit, D2=Group2 Deposit")
+        print("Legend: R1=Group1 Robot, R2=Group2 Robot, R1*=Carrying Gold, R1!=Gold Alone, ↑=North, ↓=South, →=East, ←=West, G=Gold, D1=Group1 Deposit, D2=Group2 Deposit")
         print("-" * 50)
         
         # Create a display grid
@@ -84,7 +84,8 @@ class Simulation:
         all_robots = self.group1 + self.group2
         for robot in all_robots:
             x, y = robot.position
-            direction_symbol = {'N': '→', 'S': '←', 'E': '↓', 'W': '↑'}[robot.direction]
+            # Map symbols: ↑=North, ↓=South, →=East, ←=West
+            direction_symbol = {'N': '↑', 'S': '↓', 'E': '→', 'W': '←'}[robot.direction]
             
             if robot.holding_gold:
                 if robot.carrying_with:

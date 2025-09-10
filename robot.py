@@ -15,17 +15,17 @@ class Robot:
         positions = []
 
         if self.direction == 'N':
-            positions = [(x-1,y+1),(x,y+1),(x+1,y+1),
-                         (x-2,y+2),(x-1,y+2),(x,y+2),(x+1,y+2),(x+2,y+2)]
-        elif self.direction == 'S':
-            positions = [(x-1,y-1),(x,y-1),(x+1,y-1),
-                         (x-2,y-2),(x-1,y-2),(x,y-2),(x+1,y-2),(x+2,y-2)]
-        elif self.direction == 'E':
-            positions = [(x+1,y-1),(x+1,y),(x+1,y+1),
-                         (x+2,y-2),(x+2,y-1),(x+2,y),(x+2,y+1),(x+2,y+2)]
-        elif self.direction == 'W':
             positions = [(x-1,y-1),(x-1,y),(x-1,y+1),
                          (x-2,y-2),(x-2,y-1),(x-2,y),(x-2,y+1),(x-2,y+2)]
+        elif self.direction == 'S':
+            positions = [(x+1,y-1),(x+1,y),(x+1,y+1),
+                         (x+2,y-2),(x+2,y-1),(x+2,y),(x+2,y+1),(x+2,y+2)]
+        elif self.direction == 'E':
+            positions = [(x-1,y+1),(x,y+1),(x+1,y+1),
+                         (x-2,y+2),(x-1,y+2),(x,y+2),(x+1,y+2),(x+2,y+2)]
+        elif self.direction == 'W':
+            positions = [(x-1,y-1),(x,y-1),(x+1,y-1),
+                         (x-2,y-2),(x-1,y-2),(x,y-2),(x+1,y-2),(x+2,y-2)]
 
         # Filter out-of-bounds
         valid = [(i,j) for i,j in positions if 0 <= i < grid_size and 0 <= j < grid_size]
