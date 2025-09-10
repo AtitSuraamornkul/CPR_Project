@@ -96,6 +96,9 @@ class Simulation:
                 display_grid[x][y] = f'R{robot.group}{direction_symbol}'
         
         # Print the grid
+        # Print column (Y) indices header
+        header = '    ' + ' '.join(f'{j:>3}' for j in range(self.grid.size))
+        print(header)
         for i in range(self.grid.size):
             row = ' '.join(f'{cell:>3}' for cell in display_grid[i])
             print(f"{i:2d}: {row}")
