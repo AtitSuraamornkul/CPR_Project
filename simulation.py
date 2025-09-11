@@ -64,11 +64,17 @@ class Simulation:
     def _print_grid(self):
         """Print a visual representation of the grid"""
         print("\nGrid View:")
-        print("Legend: R1=Group1 Robot, R2=Group2 Robot, R1*=Carrying Gold, R1!=Gold Alone, ↑=North, ↓=South, →=East, ←=West, G=Gold, D1=Group1 Deposit, D2=Group2 Deposit")
+        print("Legend: R1=Group1 (red), R2=Group2 (blue), * carrying pair, ! carrying alone, ↑=North, ↓=South, →=East, ←=West, G=Gold (yellow), D1=Group1 Deposit, D2=Group2 Deposit")
         print("-" * 50)
         
         # Create a display grid
         display_grid = [['.' for _ in range(self.grid.size)] for _ in range(self.grid.size)]
+        
+        # ANSI colors
+        RED = "\033[31m"
+        BLUE = "\033[34m"
+        YELLOW = "\033[33m"
+        RESET = "\033[0m"
         
         # Mark deposits
         display_grid[0][0] = 'D1'  # Group 1 deposit
@@ -78,7 +84,7 @@ class Simulation:
         for i in range(self.grid.size):
             for j in range(self.grid.size):
                 if self.grid.grid[i, j] > 0 and (i, j) not in [(0, 0), (self.grid.size-1, self.grid.size-1)]:
-                    display_grid[i][j] = f'G{self.grid.grid[i, j]}'
+                    display_grid[i][j] = f'{YELLOW}G{self.grid.grid[i, j]}{RESET}'
         
         # Mark robots
         all_robots = self.group1 + self.group2
@@ -86,14 +92,15 @@ class Simulation:
             x, y = robot.position
             # Map symbols: ↑=North, ↓=South, →=East, ←=West
             direction_symbol = {'N': '↑', 'S': '↓', 'E': '→', 'W': '←'}[robot.direction]
+            color = RED if robot.group == 1 else BLUE
             
             if robot.holding_gold:
                 if robot.carrying_with:
-                    display_grid[x][y] = f'R{robot.group}*{direction_symbol}'  # * indicates holding gold with partner
+                    display_grid[x][y] = f'{color}R{robot.group}{direction_symbol}*{RESET}'  # * indicates holding gold with partner
                 else:
-                    display_grid[x][y] = f'R{robot.group}!{direction_symbol}'  # ! indicates holding gold alone (will drop)
+                    display_grid[x][y] = f'{color}R{robot.group}{direction_symbol}!{RESET}'  # ! indicates holding gold alone (will drop)
             else:
-                display_grid[x][y] = f'R{robot.group}{direction_symbol}'
+                display_grid[x][y] = f'{color}R{robot.group}{direction_symbol}{RESET}'
         
         # Print the grid
         # Print column (Y) indices header
