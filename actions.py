@@ -9,6 +9,19 @@ def move(robot, grid_size):
     elif robot.direction == 'W' and y-1 >= 0:
         robot.position = (x, y-1)
 
+def get_turn_direction(current_direction, target_direction):
+    dirs = ['N', 'E', 'S', 'W']
+    current_idx = dirs.index(current_direction)
+    target_idx = dirs.index(target_direction)
+
+    if current_idx == target_idx:
+        return None
+
+    if (current_idx + 1) % 4 == target_idx:
+        return 'turn_right'
+    else:
+        return 'turn_left'
+
 def turn(robot, direction):
     dirs = ['N','E','S','W']
     idx = dirs.index(robot.direction)

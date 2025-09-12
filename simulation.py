@@ -1,6 +1,7 @@
 import random
 import time
-from actions import move, turn, pick_up, move_with_gold, check_deposit_delivery
+from actions import move, turn, pick_up, move_with_gold, check_deposit_delivery, get_turn_direction
+from utils import strip_ansi
 
 class Simulation:
     def __init__(self, grid, group1, group2, steps=50):
@@ -19,10 +20,45 @@ class Simulation:
 
             # Determine actions for all robots first
             for robot in all_robots:
-                x, y = robot.position
-                if self.grid.grid[x, y] > 0 and not robot.holding_gold:
+                # Sensing for gold
+                sensed_data = robot.sense(self.grid.size, self.grid.grid)
+                gold_pos = None
+                if any(d[2] == 1 for d in sensed_data):
+                    robot.gold_sensed = True
+                    gold_pos = next(d for d in sensed_data if d[2] == 1)
+                    # Simple pathfinding: move towards gold
+                    path = []
+                    dx = gold_pos[0] - robot.position[0]
+                    dy = gold_pos[1] - robot.position[1]
+                    if dx > 0: path.extend(['S'] * dx)
+                    if dx < 0: path.extend(['N'] * -dx)
+                    if dy > 0: path.extend(['E'] * dy)
+                    if dy < 0: path.extend(['W'] * -dy)
+                    robot.path = path
+                else:
+                    robot.gold_sensed = False
+                    robot.path = []
+
+                if robot.path:
+                    # Follow the path
+                    next_move = robot.path[0]
+                    if robot.direction != next_move:
+                        turn_action = get_turn_direction(robot.direction, next_move)
+                        if turn_action:
+                            robot.action = turn_action
+                        else:
+                            robot.action = 'move' # Should not happen if logic is correct
+                            robot.path.pop(0)
+                    else:
+                        robot.action = 'move'
+                        robot.path.pop(0)
+                elif robot.gold_sensed and gold_pos and robot.position == gold_pos[:2]:
+                    robot.action = 'pick_up'
+                    robot.waiting_for_partner = True
+                elif robot.waiting_for_partner:
                     robot.action = 'pick_up'
                 else:
+                    # Random action if no gold is sensed or path is complete
                     robot.action = random.choice(['move', 'turn_left', 'turn_right'])
 
             # Execute actions
@@ -113,15 +149,23 @@ class Simulation:
                     display_grid[x][y] = f'{color}R{robot.group}{direction_symbol}*{RESET}'  # * indicates holding gold with partner
                 else:
                     display_grid[x][y] = f'{color}R{robot.group}{direction_symbol}!{RESET}'  # ! indicates holding gold alone (will drop)
+            elif robot.waiting_for_partner:
+                display_grid[x][y] = f'{color}R{robot.group}{direction_symbol}!{RESET}' # ! indicates waiting for partner
+            elif robot.gold_sensed:
+                display_grid[x][y] = f'{color}R{robot.group}{direction_symbol}#{RESET}' # # indicates gold sensed
             else:
                 display_grid[x][y] = f'{color}R{robot.group}{direction_symbol}{RESET}'
         
         # Print the grid
         # Print column (Y) indices header
-        header = '    ' + ' '.join(f'{j:>3}' for j in range(self.grid.size))
+        header = '    ' + ''.join(f'{j:^7}' for j in range(self.grid.size))
         print(header)
         for i in range(self.grid.size):
-            row = ' '.join(f'{cell:>3}' for cell in display_grid[i])
-            print(f"{i:2d}: {row}")
+            row_str = []
+            for cell in display_grid[i]:
+                visible_len = len(strip_ansi(cell))
+                padding = ' ' * ((6 - visible_len) // 2)
+                row_str.append(padding + cell + padding + (' ' if (6 - visible_len) % 2 != 0 else ''))
+            print(f"{i:2d}: {' '.join(row_str)}")
         
-        print("-" * 50)
+        print("-" * (self.grid.size * 7))

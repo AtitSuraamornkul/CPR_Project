@@ -10,6 +10,9 @@ class Robot:
         self.carrying_with = None  # ID of robot carrying gold together
         self.history = []
         self.action = None
+        self.gold_sensed = False
+        self.path = []
+        self.waiting_for_partner = False
 
     def sense(self, grid_size, grid):
         x, y = self.position
