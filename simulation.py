@@ -9,6 +9,7 @@ class Simulation:
         self.group2 = group2
         self.steps = steps
         self.scores = {1: 0, 2: 0}  # Track scores for each group
+        self.pickup_counts = {1: 0, 2: 0}
 
     def run(self):
         for step in range(self.steps):
@@ -16,27 +17,38 @@ class Simulation:
             print("=" * 40)
             all_robots = self.group1 + self.group2
 
-            # First, check for deposit deliveries
+            # Determine actions for all robots first
             for robot in all_robots:
-                if robot.holding_gold:
-                    check_deposit_delivery(robot, self.grid.size, self.scores, all_robots)
+                x, y = robot.position
+                if self.grid.grid[x, y] > 0 and not robot.holding_gold:
+                    robot.action = 'pick_up'
+                else:
+                    robot.action = random.choice(['move', 'turn_left', 'turn_right'])
 
-            # Then execute actions
+            # Execute actions
             for robot in all_robots:
-                action = random.choice(['move','turn_left','turn_right','pick_up'])
-                if action == 'move':
-                    if robot.holding_gold:
-                        # If carrying gold, use special movement logic
-                        move_with_gold(robot, self.grid.size, all_robots)
-                    else:
-                        move(robot, self.grid.size)
-                elif action == 'turn_left':
-                    turn(robot,'left')
-                elif action == 'turn_right':
-                    turn(robot,'right')
-                elif action == 'pick_up':
-                    robots_here = [r for r in all_robots if r.position == robot.position]
-                    pick_up(robot, robots_here, self.grid.grid)
+                if robot.action == 'pick_up':
+                    # The pick_up logic will be handled in a centralized way to avoid redundant calls
+                    pass
+                else:
+                    if robot.action == 'move':
+                        if robot.holding_gold:
+                            move_with_gold(robot, self.grid.size, all_robots)
+                        else:
+                            move(robot, self.grid.size)
+                    elif robot.action == 'turn_left':
+                        turn(robot, 'left')
+                    elif robot.action == 'turn_right':
+                        turn(robot, 'right')
+
+            # Process pickups for all positions with gold
+            for x in range(self.grid.size):
+                for y in range(self.grid.size):
+                    if self.grid.grid[x, y] > 0:
+                        robots_here = [r for r in all_robots if r.position == (x, y) and r.action == 'pick_up']
+                        if robots_here:
+                            pick_up(robots_here, self.grid.grid)
+
 
             # Print grid view
             self._print_grid()
@@ -45,6 +57,7 @@ class Simulation:
             positions = [(r.id, r.group, r.position, r.direction, r.holding_gold, r.carrying_with) for r in all_robots]
             print(f"Robot positions: {positions}")
             print(f"Scores - Group 1: {self.scores[1]}, Group 2: {self.scores[2]}")
+            print(f"Pickups - Group 1: {self.pickup_counts[1]}, Group 2: {self.pickup_counts[2]}")
             
             # Add delay between steps (except for the last step)
             if step < self.steps - 1:
@@ -54,6 +67,7 @@ class Simulation:
         print(f"\n🏁 FINAL RESULTS:")
         print(f"Group 1 Score: {self.scores[1]}")
         print(f"Group 2 Score: {self.scores[2]}")
+        print(f"Pickups - Group 1: {self.pickup_counts[1]}, Group 2: {self.pickup_counts[2]}")
         if self.scores[1] > self.scores[2]:
             print("Group 1 WINS!")
         elif self.scores[2] > self.scores[1]:

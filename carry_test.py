@@ -39,7 +39,7 @@ def main():
 
     # Pick up (must be exactly two same-group robots on gold)
     robots_here = [r for r in (sim.group1 + sim.group2) if r.position == (2, 2)]
-    pick_up(r1, robots_here, g.grid)
+    pick_up(robots_here, g.grid)
     print_step("After pick_up", sim)
 
     # Move to deposit (0,0): North twice (x-1), then West twice (y-1)

@@ -17,18 +17,51 @@ def turn(robot, direction):
     elif direction == 'right':
         robot.direction = dirs[(idx+1) % 4]
 
-def pick_up(robot, robots, grid):
-    same_group = [r for r in robots if r.group == robot.group]
-    if len(same_group) == 2:
-        x, y = robot.position
-        if grid[x,y] >= 1:
-            # Check if exactly 2 robots from same group are trying to pick up
-            picking_up = [r for r in same_group if r.holding_gold == False]
-            if len(picking_up) == 2:
-                for r in picking_up: 
-                    r.holding_gold = True
-                    r.carrying_with = picking_up[1].id if r.id == picking_up[0].id else picking_up[0].id
-                grid[x,y] -= 1
+def pick_up(robots, grid):
+    if not robots:
+        return
+
+    x, y = robots[0].position
+    gold_on_pos = grid[x, y]
+    
+    # Separate robots by group
+    group1_robots = [r for r in robots if r.group == 1]
+    group2_robots = [r for r in robots if r.group == 2]
+
+    g1_wants_pickup = len(group1_robots)
+    g2_wants_pickup = len(group2_robots)
+
+    g1_can_pickup = g1_wants_pickup == 2
+    g2_can_pickup = g2_wants_pickup == 2
+
+    if g1_can_pickup and g2_can_pickup:
+        if gold_on_pos >= 2:
+            # Both groups pick up gold
+            for r in group1_robots:
+                r.holding_gold = True
+                r.carrying_with = group1_robots[1].id if r.id == group1_robots[0].id else group1_robots[0].id
+            grid[x, y] -= 1
+            
+            for r in group2_robots:
+                r.holding_gold = True
+                r.carrying_with = group2_robots[1].id if r.id == group2_robots[0].id else group2_robots[0].id
+            grid[x, y] -= 1
+            
+    elif g1_can_pickup and not g2_can_pickup:
+        if gold_on_pos >= 1:
+            # Group 1 picks up gold
+            for r in group1_robots:
+                r.holding_gold = True
+                r.carrying_with = group1_robots[1].id if r.id == group1_robots[0].id else group1_robots[0].id
+            grid[x, y] -= 1
+
+    elif not g1_can_pickup and g2_can_pickup:
+        if gold_on_pos >= 1:
+            # Group 2 picks up gold
+            for r in group2_robots:
+                r.holding_gold = True
+                r.carrying_with = group2_robots[1].id if r.id == group2_robots[0].id else group2_robots[0].id
+            grid[x, y] -= 1
 
 def move_with_gold(robot, grid_size, all_robots):
     """Handle movement when robot is carrying gold"""

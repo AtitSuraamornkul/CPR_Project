@@ -8,5 +8,5 @@ if __name__ == "__main__":
     group1 = create_group(1, 10, grid.size)
     group2 = create_group(2, 10, grid.size)
 
-    sim = Simulation(grid, group1, group2, steps=20)
+    sim = Simulation(grid, group1, group2, steps=10)
     sim.run()
