@@ -39,7 +39,15 @@ class Simulation:
                     robot.gold_sensed = False
                     robot.path = []
 
-                if robot.path:
+                on_gold = self.grid.grid[robot.position] == 1
+
+                if robot.waiting_for_partner:
+                    # If waiting for a partner, the robot should not move
+                    robot.action = 'pick_up'
+                elif on_gold:
+                    robot.action = 'pick_up'
+                    robot.waiting_for_partner = True
+                elif robot.path:
                     # Follow the path
                     next_move = robot.path[0]
                     if robot.direction != next_move:
@@ -52,14 +60,10 @@ class Simulation:
                     else:
                         robot.action = 'move'
                         robot.path.pop(0)
-                elif robot.gold_sensed and gold_pos and robot.position == gold_pos[:2]:
-                    robot.action = 'pick_up'
-                    robot.waiting_for_partner = True
-                elif robot.waiting_for_partner:
-                    robot.action = 'pick_up'
                 else:
                     # Random action if no gold is sensed or path is complete
                     robot.action = random.choice(['move', 'turn_left', 'turn_right'])
+                print(f"Robot {robot.id} action: {robot.action}")
 
             # Execute actions
             for robot in all_robots:
@@ -69,7 +73,7 @@ class Simulation:
                 else:
                     if robot.action == 'move':
                         if robot.holding_gold:
-                            move_with_gold(robot, self.grid.size, all_robots)
+                            move_with_gold(robot, self.grid.size, all_robots, self.grid.grid)
                         else:
                             move(robot, self.grid.size)
                     elif robot.action == 'turn_left':
@@ -83,7 +87,9 @@ class Simulation:
                     if self.grid.grid[x, y] > 0:
                         robots_here = [r for r in all_robots if r.position == (x, y) and r.action == 'pick_up']
                         if robots_here:
-                            pick_up(robots_here, self.grid.grid)
+                            successful_groups = pick_up(robots_here, self.grid.grid)
+                            for group in successful_groups:
+                                self.pickup_counts[group] += 1
 
 
             # Print grid view
@@ -97,7 +103,7 @@ class Simulation:
             
             # Add delay between steps (except for the last step)
             if step < self.steps - 1:
-                time.sleep(1)
+                time.sleep(0.01)
         
         # Print final results
         print(f"\n🏁 FINAL RESULTS:")

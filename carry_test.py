@@ -39,6 +39,8 @@ def main():
 
     # Pick up (must be exactly two same-group robots on gold)
     robots_here = [r for r in (sim.group1 + sim.group2) if r.position == (2, 2)]
+    for r in robots_here:
+        r.action = 'pick_up'
     pick_up(robots_here, g.grid)
     print_step("After pick_up", sim)
 
@@ -46,13 +48,13 @@ def main():
     for k in range(2):
         r1.direction = 'N'
         r2.direction = 'N'
-        move_with_gold(r1, g.size, sim.group1 + sim.group2)
+        move_with_gold(r1, g.size, sim.group1 + sim.group2, g.grid)
         print_step(f"Move North step {k+1}", sim)
 
     for k in range(2):
         r1.direction = 'W'
         r2.direction = 'W'
-        move_with_gold(r1, g.size, sim.group1 + sim.group2)
+        move_with_gold(r1, g.size, sim.group1 + sim.group2, g.grid)
         print_step(f"Move West step {k+1}", sim)
 
     # Deliver
