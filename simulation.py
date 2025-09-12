@@ -19,61 +19,39 @@ class Simulation:
             all_robots = self.group1 + self.group2
 
             # Determine actions for all robots first
+            messages_to_send = []
             for robot in all_robots:
-                # Sensing for gold
-                sensed_data = robot.sense(self.grid.size, self.grid.grid)
-                gold_pos = None
-                if any(d[2] == 1 for d in sensed_data):
-                    robot.gold_sensed = True
-                    gold_pos = next(d for d in sensed_data if d[2] == 1)
-                    # Simple pathfinding: move towards gold
-                    path = []
-                    dx = gold_pos[0] - robot.position[0]
-                    dy = gold_pos[1] - robot.position[1]
-                    if dx > 0: path.extend(['S'] * dx)
-                    if dx < 0: path.extend(['N'] * -dx)
-                    if dy > 0: path.extend(['E'] * dy)
-                    if dy < 0: path.extend(['W'] * -dy)
-                    robot.path = path
-                else:
-                    robot.gold_sensed = False
-                    robot.path = []
-
-                on_gold = self.grid.grid[robot.position] == 1
-
-                if robot.waiting_for_partner:
-                    # If waiting for a partner, the robot should not move
-                    robot.action = 'pick_up'
-                elif on_gold:
-                    robot.action = 'pick_up'
-                    robot.waiting_for_partner = True
-                elif robot.path:
-                    # Follow the path
-                    next_move = robot.path[0]
-                    if robot.direction != next_move:
-                        turn_action = get_turn_direction(robot.direction, next_move)
-                        if turn_action:
-                            robot.action = turn_action
-                        else:
-                            robot.action = 'move' # Should not happen if logic is correct
-                            robot.path.pop(0)
-                    else:
-                        robot.action = 'move'
-                        robot.path.pop(0)
-                else:
-                    # Random action if no gold is sensed or path is complete
-                    robot.action = random.choice(['move', 'turn_left', 'turn_right'])
+                robot.decide_action(self.grid)
                 print(f"Robot {robot.id} action: {robot.action}")
+                # For testing communication, let's add a simple message sending logic
+                if random.random() < 0.1: # 10% chance to send a message
+                    target_robot_id = random.choice([r.id for r in all_robots if r.group == robot.group and r.id != robot.id])
+                    messages_to_send.append({'sender': robot.id, 'receiver': target_robot_id, 'content': 'Hello partner!'})
+
+            # Process messages
+            for message in messages_to_send:
+                receiver_robot = next((r for r in all_robots if r.id == message['receiver']), None)
+                if receiver_robot:
+                    receiver_robot.message_inbox.append(message['content'])
 
             # Execute actions
+            moved_robots = set()
             for robot in all_robots:
+                if robot.id in moved_robots:
+                    continue
+
+                # Log every action
+                robot.history.append(robot.action)
+
                 if robot.action == 'pick_up':
                     # The pick_up logic will be handled in a centralized way to avoid redundant calls
                     pass
                 else:
                     if robot.action == 'move':
                         if robot.holding_gold:
-                            move_with_gold(robot, self.grid.size, all_robots, self.grid.grid)
+                            if not move_with_gold(robot, self.grid.size, all_robots, self.grid.grid):
+                                # This call now correctly enforces the dropping logic
+                                moved_robots.add(robot.carrying_with)
                         else:
                             move(robot, self.grid.size)
                     elif robot.action == 'turn_left':
@@ -91,6 +69,10 @@ class Simulation:
                             for group in successful_groups:
                                 self.pickup_counts[group] += 1
 
+            # Check for deposit delivery
+            for robot in all_robots:
+                check_deposit_delivery(robot, self.grid.size, self.scores, all_robots)
+
 
             # Print grid view
             self._print_grid()
@@ -100,10 +82,15 @@ class Simulation:
             print(f"Robot positions: {positions}")
             print(f"Scores - Group 1: {self.scores[1]}, Group 2: {self.scores[2]}")
             print(f"Pickups - Group 1: {self.pickup_counts[1]}, Group 2: {self.pickup_counts[2]}")
+
+            # Check for game over
+            #if not any(self.grid.grid[x, y] == 1 for x in range(self.grid.size) for y in range(self.grid.size)):
+            #    print("\n🏁 GAME OVER - All gold collected!")
+            #    break
             
             # Add delay between steps (except for the last step)
-            if step < self.steps - 1:
-                time.sleep(0.01)
+            #if step < self.steps - 1:
+            #    time.sleep(0.01)
         
         # Print final results
         print(f"\n🏁 FINAL RESULTS:")
