@@ -23,7 +23,7 @@ class Simulation:
             for robot in all_robots:
                 robot.decide_action(self.grid)
                 print(f"Robot {robot.id} action: {robot.action}")
-                # For testing communication, let's add a simple message sending logic
+                # For testing communication
                 if random.random() < 0.1: # 10% chance to send a message
                     target_robot_id = random.choice([r.id for r in all_robots if r.group == robot.group and r.id != robot.id])
                     messages_to_send.append({'sender': robot.id, 'receiver': target_robot_id, 'content': 'Hello partner!'})
@@ -90,7 +90,7 @@ class Simulation:
             
             # Add delay between steps (except for the last step)
             #if step < self.steps - 1:
-                #time.sleep(0.5)
+            #    time.sleep(0.2)
         
         # Print final results
         print(f"\n🏁 FINAL RESULTS:")
