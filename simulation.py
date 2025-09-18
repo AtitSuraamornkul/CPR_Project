@@ -89,8 +89,8 @@ class Simulation:
                 #break
             
             # Add delay between steps (except for the last step)
-            #if step < self.steps - 1:
-            #    time.sleep(0.2)
+            if step < self.steps - 1:
+                time.sleep(0.2)
         
         # Print final results
         print(f"\n🏁 FINAL RESULTS:")
