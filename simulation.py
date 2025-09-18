@@ -49,9 +49,9 @@ class Simulation:
                 else:
                     if robot.action == 'move':
                         if robot.holding_gold:
-                            if not move_with_gold(robot, self.grid.size, all_robots, self.grid.grid):
-                                # This call now correctly enforces the dropping logic
-                                moved_robots.add(robot.carrying_with)
+                            partner_id = robot.carrying_with
+                            if move_with_gold(robot, self.grid.size, all_robots, self.grid.grid):
+                                moved_robots.add(partner_id)
                         else:
                             move(robot, self.grid.size)
                     elif robot.action == 'turn_left':
@@ -85,12 +85,12 @@ class Simulation:
 
             # Check for game over
             #if not any(self.grid.grid[x, y] == 1 for x in range(self.grid.size) for y in range(self.grid.size)):
-            #    print("\n🏁 GAME OVER - All gold collected!")
-            #    break
+                #print("\n GAME OVER - All gold collected!")
+                #break
             
             # Add delay between steps (except for the last step)
             #if step < self.steps - 1:
-            #    time.sleep(0.01)
+                #time.sleep(0.5)
         
         # Print final results
         print(f"\n🏁 FINAL RESULTS:")
