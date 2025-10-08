@@ -30,8 +30,8 @@ class Simulation:
             self._print_grid()
             
             # Print robot positions and scores
-            positions = [(r.id, r.group, r.position, r.direction, r.holding_gold, r.carrying_with) for r in all_robots]
-            print(f"Robot positions: {positions}")
+            positions = [(r.id, r.state, r.carrying_with, r.accepted_proposal) for r in all_robots]
+            print(f"Robot states: {positions}")
             print(f"Scores - Group 1: {self.scores[1]}, Group 2: {self.scores[2]}")
             print(f"Pickups - Group 1: {self.pickup_counts[1]}, Group 2: {self.pickup_counts[2]}")
 
@@ -68,25 +68,29 @@ class Simulation:
         for robot in all_robots:
             if robot.state == "carrying_gold" and robot.id < robot.carrying_with:
                 partner = next((r for r in all_robots if r.id == robot.carrying_with), None)
-                if partner and partner.state == "carrying_gold":
+                if partner:
                     if robot.target_gold_pos and self.grid.grid[robot.target_gold_pos] > 0:
                         self.grid.grid[robot.target_gold_pos] -= 1
                         self.pickup_counts[robot.group] += 1
+                        print(f"DEBUG: Pickup by Group {robot.group} at {robot.target_gold_pos}. Total pickups: {sum(self.pickup_counts.values())}")
 
         # Handle deposits
         for robot in all_robots:
-            if robot.state == "at_deposit":
+            if robot.state == "at_deposit" and robot.holding_gold:
                 deposit_pos = (0, 0) if robot.group == 1 else (self.grid.size-1, self.grid.size-1)
-                if robot.position == deposit_pos and robot.holding_gold:
-                    self.scores[robot.group] += 1
-                    robot.state = "idle"
-                    robot.holding_gold = False
-                    partner_id = robot.carrying_with
-                    robot.carrying_with = None
-                    partner = next((r for r in all_robots if r.id == partner_id), None)
-                    if partner:
-                        partner.state = "idle"
+                if robot.position == deposit_pos:
+                    partner = next((r for r in all_robots if r.id == robot.carrying_with), None)
+                    # Only score if the partner is also valid and holding gold, to prevent double-counting
+                    if partner and partner.holding_gold:
+                        self.scores[robot.group] += 1
+                        print(f"DEBUG: Score by Group {robot.group}, Robots {robot.id}&{partner.id}. Total score: {sum(self.scores.values())}")
+                        
+                        # Reset both robots atomically
+                        robot.holding_gold = False
                         partner.holding_gold = False
+                        robot.state = "idle"
+                        partner.state = "idle"
+                        robot.carrying_with = None
                         partner.carrying_with = None
 
 
