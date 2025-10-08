@@ -36,7 +36,8 @@ class Simulation:
             print(f"Pickups - Group 1: {self.pickup_counts[1]}, Group 2: {self.pickup_counts[2]}")
 
             if step < self.steps - 1:
-                time.sleep(0.2)
+                #input("Press Enter for next step...")
+                time.sleep(0.5)
         
         self._print_final_results()
 
@@ -63,8 +64,8 @@ class Simulation:
             if robot.state == "carrying_gold" and robot.id < robot.carrying_with:
                 partner = next((r for r in all_robots if r.id == robot.carrying_with), None)
                 if partner and partner.state == "carrying_gold":
-                    if self.grid.grid[robot.position] > 0:
-                        self.grid.grid[robot.position] -= 1
+                    if robot.target_gold_pos and self.grid.grid[robot.target_gold_pos] > 0:
+                        self.grid.grid[robot.target_gold_pos] -= 1
                         self.pickup_counts[robot.group] += 1
 
         # Handle deposits

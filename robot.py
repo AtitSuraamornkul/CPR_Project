@@ -67,9 +67,18 @@ class Robot:
                 self._move_towards(self.target_gold_pos)
 
         elif self.state == "at_gold":
-            self.send_message("propose_pickup", {"pos": self.position}, broadcast=True, at_pos=self.position)
-            self.state = "waiting_for_partner"
-            self.waiting_timer = 0
+            # Only the lowest ID robot at the location should propose
+            is_lowest_id = True
+            other_robots_at_pos = [r for r in robots if r.id != self.id and r.group == self.group and r.position == self.position and r.state in ["at_gold", "waiting_for_partner"]]
+            for r in other_robots_at_pos:
+                if r.id < self.id:
+                    is_lowest_id = False
+                    break
+            
+            if is_lowest_id:
+                self.send_message("propose_pickup", {"pos": self.position}, broadcast=True, at_pos=self.position)
+                self.state = "waiting_for_partner"
+                self.waiting_timer = 0
 
         elif self.state == "waiting_for_partner":
             if self.carrying_with:
@@ -202,7 +211,7 @@ class Robot:
                     self.state = "forming_pair"
 
             elif msg_type == "confirm_pickup":
-                self.carrying_with = content["partner_id"]
+                self.carrying_with = sender_id
                 self.target_gold_pos = tuple(content["pos"])
                 self.state = "carrying_gold"
                 self.holding_gold = True
@@ -217,7 +226,7 @@ class Robot:
                 pos = tuple(content["pos"])
                 if pos in self.known_gold_locations:
                     self.known_gold_locations.pop(pos, None)
-                    if self.target_gold_pos == pos:
+                    if self.target_gold_pos == pos and not self.holding_gold:
                         self.state = "wandering"
                         self.target_gold_pos = None
 
