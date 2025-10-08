@@ -7,6 +7,7 @@ class Grid:
         self.grid = np.zeros((size, size), dtype=int)
         self._place_deposits()
         self._place_gold(num_gold)
+        self.num_gold = np.count_nonzero(self.grid == 1)
 
     def _place_deposits(self):
         # Fixed deposits: top-left for group 1, bottom-right for group 2

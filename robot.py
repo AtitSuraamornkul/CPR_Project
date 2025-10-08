@@ -16,6 +16,7 @@ class Robot:
         self.action = None
         self.state = "wandering"
         self.waiting_timer = 0
+        self.accepted_proposal = None
 
     def sense(self, grid):
         x, y = self.position
@@ -41,77 +42,92 @@ class Robot:
             if value == 1 and (i,j) not in self.known_gold_locations:
                 self.send_message("gold_location", {"pos": [i,j]}, broadcast=True)
 
+
     def update(self, grid, robots):
-        self.action = None
-        self._process_messages(robots)
-        self.sense(grid)
+            self.action = None
+            self._process_messages(robots)
+            self.sense(grid)
 
-        if self.state == "idle":
-            self.state = "wandering"
-            self.action = random.choice(['move', 'turn_left', 'turn_right'])
-
-        if self.state == "wandering":
-            unclaimed_gold = [pos for pos, status in self.known_gold_locations.items() if status == "unknown"]
-            if unclaimed_gold:
-                self.target_gold_pos = unclaimed_gold[0]
-                self.state = "moving_to_gold"
-                self.known_gold_locations[self.target_gold_pos] = "claimed"
-                self.send_message("claim_gold", {"pos": self.target_gold_pos}, broadcast=True)
-            else:
+            if self.state == "idle":
+                self.state = "wandering"
                 self.action = random.choice(['move', 'turn_left', 'turn_right'])
 
-        elif self.state == "moving_to_gold":
-            if self.position == self.target_gold_pos:
-                self.state = "at_gold"
-            else:
-                self._move_towards(self.target_gold_pos)
+            if self.state == "wandering":
+                unclaimed_gold = [pos for pos, status in self.known_gold_locations.items() if status == "unknown"]
+                if unclaimed_gold:
+                    self.target_gold_pos = unclaimed_gold[0]
+                    self.state = "moving_to_gold"
+                    self.known_gold_locations[self.target_gold_pos] = "claimed"
+                    self.send_message("claim_gold", {"pos": self.target_gold_pos}, broadcast=True)
+                else:
+                    self.action = random.choice(['move', 'turn_left', 'turn_right'])
 
-        elif self.state == "at_gold":
-            # Only the lowest ID robot at the location should propose
-            is_lowest_id = True
-            other_robots_at_pos = [r for r in robots if r.id != self.id and r.group == self.group and r.position == self.position and r.state in ["at_gold", "waiting_for_partner"]]
-            for r in other_robots_at_pos:
-                if r.id < self.id:
-                    is_lowest_id = False
-                    break
+            elif self.state == "moving_to_gold":
+                if self.position == self.target_gold_pos:
+                    self.state = "at_gold"
+                    # Check if there's already a robot waiting here
+                    robots_at_pos = [r for r in robots if r.position == self.position and r.id != self.id]
+                    waiting_robots = [r for r in robots_at_pos if r.state == "waiting_for_partner"]
+                    if waiting_robots:
+                        # Pair immediately with the first waiting robot
+                        partner = waiting_robots[0]
+                        self.carrying_with = partner.id
+                        partner.carrying_with = self.id
+                        self.send_message("accept_pickup", {"pos": self.position}, recipient_id=partner.id)
+                        self.state = "forming_pair"
+                else:
+                    self._move_towards(self.target_gold_pos)
+
+            elif self.state == "at_gold":
+                # Look for other robots at this position to pair with
+                robots_at_pos = [r for r in robots if r.position == self.position and r.id != self.id]
+                if robots_at_pos:
+                    # Try to pair with any robot at this position
+                    partner = robots_at_pos[0]
+                    if partner.state in ["at_gold", "waiting_for_partner"]:
+                        self.send_message("propose_pickup", {"pos": self.position}, recipient_id=partner.id)
+                        self.state = "waiting_for_partner"
+                        self.waiting_timer = 0
+                else:
+                    # No partner yet, broadcast and wait
+                    self.send_message("propose_pickup", {"pos": self.position}, broadcast=True, at_pos=self.position)
+                    self.state = "waiting_for_partner"
+                    self.waiting_timer = 0
+
+            elif self.state == "waiting_for_partner":
+                if self.carrying_with:
+                    self.state = "forming_pair"
+                elif self.waiting_timer > 15:
+                    self.state = "wandering"
+                    self.known_gold_locations[self.target_gold_pos] = "unknown"
+                    self.send_message("abandon_pickup", {"pos": self.target_gold_pos}, broadcast=True)
+                    self.target_gold_pos = None
+                    self.accepted_proposal = None
+                else:
+                    self.waiting_timer += 1
             
-            if is_lowest_id:
-                self.send_message("propose_pickup", {"pos": self.position}, broadcast=True, at_pos=self.position)
-                self.state = "waiting_for_partner"
-                self.waiting_timer = 0
+            elif self.state == "forming_pair":
+                if self.id < self.carrying_with:
+                    self.send_message("confirm_pickup", {"partner_id": self.carrying_with, "pos": self.target_gold_pos}, recipient_id=self.carrying_with)
+                    self.state = "carrying_gold"
+                    self.holding_gold = True
+                    self.send_message("gold_collected", {"pos": self.target_gold_pos}, broadcast=True)
 
-        elif self.state == "waiting_for_partner":
-            if self.carrying_with:
-                self.state = "forming_pair"
-            elif self.waiting_timer > 15:
+            elif self.state == "carrying_gold":
+                deposit_pos = (0, 0) if self.group == 1 else (self.grid_size-1, self.grid_size-1)
+                if self.position == deposit_pos:
+                    self.state = "at_deposit"
+                else:
+                    self._move_towards(deposit_pos)
+
+            elif self.state == "at_deposit":
+                self.holding_gold = False
+                self.carrying_with = None
+                self.accepted_proposal = None
                 self.state = "wandering"
-                self.known_gold_locations[self.target_gold_pos] = "unknown"
-                self.send_message("abandon_pickup", {"pos": self.target_gold_pos}, broadcast=True)
-                self.target_gold_pos = None
-            else:
-                self.waiting_timer += 1
-        
-        elif self.state == "forming_pair":
-            if self.id < self.carrying_with:
-                self.send_message("confirm_pickup", {"partner_id": self.carrying_with, "pos": self.target_gold_pos}, recipient_id=self.carrying_with)
-                self.state = "carrying_gold"
-                self.holding_gold = True
-                self.send_message("gold_collected", {"pos": self.target_gold_pos}, broadcast=True)
+                self.action = random.choice(['move', 'turn_left', 'turn_right'])
 
-        elif self.state == "carrying_gold":
-            deposit_pos = (0, 0) if self.group == 1 else (self.grid_size-1, self.grid_size-1)
-            if self.position == deposit_pos:
-                self.state = "at_deposit"
-            else:
-                self._move_towards(deposit_pos)
-
-        elif self.state == "at_deposit":
-            self.holding_gold = False
-            self.carrying_with = None
-            self.state = "wandering"
-            self.action = random.choice(['move', 'turn_left', 'turn_right'])
-
-        self._execute_action(grid)
+            self._execute_action(grid)
 
     def _execute_action(self, grid):
         if self.action == 'move':
@@ -200,13 +216,16 @@ class Robot:
 
             elif msg_type == "propose_pickup":
                 pos = tuple(content["pos"])
-                if self.state == "at_gold" and self.position == pos:
-                    self.send_message("accept_pickup", {"pos": pos}, recipient_id=sender_id)
-                    self.state = "waiting_for_partner"
+                # Accept if we're at the position and in a compatible state
+                if self.position == pos and self.state in ["at_gold", "waiting_for_partner"]:
+                    if not self.carrying_with:  # Not already paired
+                        self.send_message("accept_pickup", {"pos": pos}, recipient_id=sender_id)
+                        self.carrying_with = sender_id
+                        self.state = "forming_pair"
 
             elif msg_type == "accept_pickup":
                 pos = tuple(content["pos"])
-                if self.state == "waiting_for_partner" and self.position == pos:
+                if self.position == pos and not self.carrying_with:
                     self.carrying_with = sender_id
                     self.state = "forming_pair"
 
@@ -215,10 +234,17 @@ class Robot:
                 self.target_gold_pos = tuple(content["pos"])
                 self.state = "carrying_gold"
                 self.holding_gold = True
+                self.accepted_proposal = None
             
             elif msg_type == "abandon_pickup":
                 pos = tuple(content["pos"])
-                if self.target_gold_pos == pos:
+                if self.accepted_proposal == sender_id:
+                    self.accepted_proposal = None
+                    if self.position == pos:
+                        self.state = "at_gold"
+                    else:
+                        self.state = "wandering"
+                elif self.target_gold_pos == pos and not self.holding_gold:
                     self.state = "wandering"
                     self.target_gold_pos = None
 

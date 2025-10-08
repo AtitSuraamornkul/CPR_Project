@@ -16,12 +16,12 @@ class Simulation:
             print("=" * 40)
             all_robots = self.group1 + self.group2
 
+            # Process messages
+            self._process_messages(all_robots)
+
             # Update all robots
             for robot in all_robots:
                 robot.update(self.grid.grid, all_robots)
-
-            # Process messages
-            self._process_messages(all_robots)
 
             # Process physical actions (gold pickup from grid)
             self._process_actions(all_robots)
@@ -35,9 +35,14 @@ class Simulation:
             print(f"Scores - Group 1: {self.scores[1]}, Group 2: {self.scores[2]}")
             print(f"Pickups - Group 1: {self.pickup_counts[1]}, Group 2: {self.pickup_counts[2]}")
 
+            # Check if all gold has been deposited
+            if (self.scores[1] + self.scores[2]) >= self.grid.num_gold:
+                print("\nAll gold has been deposited! Ending simulation.")
+                break
+
             if step < self.steps - 1:
                 #input("Press Enter for next step...")
-                time.sleep(0.5)
+                time.sleep(0.1)
         
         self._print_final_results()
 
