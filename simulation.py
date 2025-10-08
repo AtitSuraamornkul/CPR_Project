@@ -16,7 +16,7 @@ class Simulation:
             print("=" * 40)
             all_robots = self.group1 + self.group2
 
-            # Process messages
+            # Process messages and handle world state changes like gold drops
             self._process_messages(all_robots)
 
             # Update all robots
@@ -35,31 +35,41 @@ class Simulation:
             print(f"Scores - Group 1: {self.scores[1]}, Group 2: {self.scores[2]}")
             print(f"Pickups - Group 1: {self.pickup_counts[1]}, Group 2: {self.pickup_counts[2]}")
 
-            # Check if all gold has been deposited
-            if (self.scores[1] + self.scores[2]) >= self.grid.num_gold:
-                print("\nAll gold has been deposited! Ending simulation.")
-                break
-
             if step < self.steps - 1:
-                #input("Press Enter for next step...")
                 time.sleep(0.1)
         
         self._print_final_results()
 
     def _process_messages(self, all_robots):
+        """
+        Process all messages, and handle any direct world-state changes
+        that result from them (e.g., dropping gold).
+        """
         messages_to_deliver = []
         for robot in all_robots:
             messages_to_deliver.extend(robot.message_outbox)
             robot.message_outbox = []
 
         for msg in messages_to_deliver:
+            # ** BUG FIX AREA **
+            # Handle gold drop messages directly to update the grid
+            if msg["type"] == "drop_gold":
+                pos = tuple(msg["content"]["pos"])
+                if self.grid.grid[pos] == 0: # Ensure gold is not already there
+                    self.grid.grid[pos] = 1
+                    print(f"DEBUG: Gold dropped back onto the grid at {pos}")
+
+            # Deliver messages to recipients
             for robot in all_robots:
                 if msg.get("broadcast"):
-                    sender_group = next((r.group for r in all_robots if r.id == msg["sender_id"]), None)
-                    if robot.group == sender_group and robot.id != msg["sender_id"]:
-                        robot.message_inbox.append(msg)
+                    # The robot handles the drop_gold message to reset its own state
+                    sender = next((r for r in all_robots if r.id == msg["sender_id"]), None)
+                    if sender and robot.group == sender.group and robot.id != msg["sender_id"]:
+                         robot.message_inbox.append(msg)
+
                 elif "recipient_id" in msg and robot.id == msg["recipient_id"]:
                     robot.message_inbox.append(msg)
+
 
     def _process_actions(self, all_robots):
         """Handle physical world actions - gold pickup and deposits"""
@@ -80,12 +90,10 @@ class Simulation:
                 deposit_pos = (0, 0) if robot.group == 1 else (self.grid.size-1, self.grid.size-1)
                 if robot.position == deposit_pos:
                     partner = next((r for r in all_robots if r.id == robot.carrying_with), None)
-                    # Only score if the partner is also valid and holding gold, to prevent double-counting
                     if partner and partner.holding_gold:
                         self.scores[robot.group] += 1
                         print(f"DEBUG: Score by Group {robot.group}, Robots {robot.id}&{partner.id}. Total score: {sum(self.scores.values())}")
                         
-                        # Reset both robots atomically
                         robot.holding_gold = False
                         partner.holding_gold = False
                         robot.state = "idle"
