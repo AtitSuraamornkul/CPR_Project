@@ -1,23 +1,23 @@
 import random
-from actions import get_turn_direction
 
 class Robot:
-    def __init__(self, rid, group, pos, direction=None):
+    def __init__(self, rid, group, pos, grid_size, direction=None):
         self.id = rid
         self.group = group
         self.position = pos
+        self.grid_size = grid_size
         self.direction = direction if direction else random.choice(['N','S','E','W'])
         self.holding_gold = False
-        self.carrying_with = None  # ID of robot carrying gold together
-        self.history = []
-        self.action = None
-        self.gold_sensed = False
-        self.path = []
-        self.waiting_for_partner = False
-        self.waiting_timer = 0
+        self.carrying_with = None
         self.message_inbox = []
+        self.message_outbox = []
+        self.known_gold_locations = {}
+        self.target_gold_pos = None
+        self.action = None
+        self.state = "wandering"
+        self.waiting_timer = 0
 
-    def sense(self, grid_size, grid):
+    def sense(self, grid):
         x, y = self.position
         positions = []
 
@@ -34,92 +34,185 @@ class Robot:
             positions = [(x-1,y-1),(x,y-1),(x+1,y-1),
                          (x-2,y-2),(x-1,y-2),(x,y-2),(x+1,y-2),(x+2,y-2)]
 
-        # Filter out-of-bounds
-        valid = [(i,j) for i,j in positions if 0 <= i < grid_size and 0 <= j < grid_size]
-        return [(i,j,grid[i,j]) for i,j in valid]
+        valid = [(i,j) for i,j in positions if 0 <= i < self.grid_size and 0 <= j < self.grid_size]
+        sensed_data = [(i,j,grid[i,j]) for i,j in valid]
 
-    def decide_action(self, grid):
-        # If holding gold, go to the deposit
-        if self.holding_gold:
-            self.waiting_for_partner = False
-            self.waiting_timer = 0
-            deposit_pos = (0, 0) if self.group == 1 else (grid.size-1, grid.size-1)
-            path = []
-            dx = deposit_pos[0] - self.position[0]
-            dy = deposit_pos[1] - self.position[1]
+        for i, j, value in sensed_data:
+            if value == 1 and (i,j) not in self.known_gold_locations:
+                self.send_message("gold_location", {"pos": [i,j]}, broadcast=True)
 
-            if dx > 0: path.extend(['S'] * dx)
-            if dx < 0: path.extend(['N'] * -dx)
-            if dy > 0: path.extend(['E'] * dy)
-            if dy < 0: path.extend(['W'] * -dy)
-            self.path = path
+    def update(self, grid, robots):
+        self.action = None
+        self._process_messages(robots)
+        self.sense(grid)
 
-            # Action determination for holding gold
-            if self.path:
-                next_move = self.path[0]
-                if self.direction != next_move:
-                    turn_action = get_turn_direction(self.direction, next_move)
-                    if turn_action:
-                        self.action = turn_action
-                    else: # Should not happen if logic is correct
-                        self.action = 'move'
-                        self.path.pop(0)
-                else:
-                    self.action = 'move'
-                    self.path.pop(0)
-            else: # Path is empty, meaning robot is at the deposit
-                self.action = 'wait' # Wait at deposit to be processed
-
-        else: # LOGIC FOR ROBOTS NOT HOLDING GOLD
-            # Process messages (placeholder for now)
-            if self.message_inbox:
-                print(f"Robot {self.id} received messages: {self.message_inbox}")
-                self.message_inbox = [] # Clear inbox after processing
-
-            # Sensing for gold
-            sensed_data = self.sense(grid.size, grid.grid)
-            if any(d[2] == 1 for d in sensed_data):
-                self.gold_sensed = True
-                gold_pos = next(d for d in sensed_data if d[2] == 1)
-                # Simple pathfinding: move towards gold
-                path = []
-                dx = gold_pos[0] - self.position[0]
-                dy = gold_pos[1] - self.position[1]
-                if dx > 0: path.extend(['S'] * dx)
-                if dx < 0: path.extend(['N'] * -dx)
-                if dy > 0: path.extend(['E'] * dy)
-                if dy < 0: path.extend(['W'] * -dy)
-                self.path = path
+        if self.state == "wandering":
+            unclaimed_gold = [pos for pos, status in self.known_gold_locations.items() if status == "unknown"]
+            if unclaimed_gold:
+                self.target_gold_pos = unclaimed_gold[0]
+                self.state = "moving_to_gold"
+                self.known_gold_locations[self.target_gold_pos] = "claimed"
+                self.send_message("claim_gold", {"pos": self.target_gold_pos}, broadcast=True)
             else:
-                self.gold_sensed = False
-                self.path = []
-
-            on_gold = grid.grid[self.position] == 1
-
-            if self.waiting_for_partner:
-                if self.waiting_timer > 15:
-                    self.waiting_for_partner = False
-                    self.waiting_timer = 0
-                    self.action = random.choice(['move', 'turn_left', 'turn_right'])
-                else:
-                    self.waiting_timer += 1
-                    self.action = 'pick_up'
-            elif on_gold:
-                self.action = 'pick_up'
-                self.waiting_for_partner = True
-            elif self.path:
-                # Follow the path to gold
-                next_move = self.path[0]
-                if self.direction != next_move:
-                    turn_action = get_turn_direction(self.direction, next_move)
-                    if turn_action:
-                        self.action = turn_action
-                    else: # Should not happen if logic is correct
-                        self.action = 'move'
-                        self.path.pop(0)
-                else:
-                    self.action = 'move'
-                    self.path.pop(0)
-            else:
-                # Random action if no gold is sensed or path is complete
                 self.action = random.choice(['move', 'turn_left', 'turn_right'])
+
+        elif self.state == "moving_to_gold":
+            if self.position == self.target_gold_pos:
+                self.state = "at_gold"
+            else:
+                self._move_towards(self.target_gold_pos)
+
+        elif self.state == "at_gold":
+            self.send_message("propose_pickup", {"pos": self.position}, broadcast=True, at_pos=self.position)
+            self.state = "waiting_for_partner"
+            self.waiting_timer = 0
+
+        elif self.state == "waiting_for_partner":
+            if self.carrying_with:
+                self.state = "forming_pair"
+            elif self.waiting_timer > 15:
+                self.state = "wandering"
+                self.known_gold_locations[self.target_gold_pos] = "unknown"
+                self.send_message("abandon_pickup", {"pos": self.target_gold_pos}, broadcast=True)
+                self.target_gold_pos = None
+            else:
+                self.waiting_timer += 1
+        
+        elif self.state == "forming_pair":
+            if self.id < self.carrying_with:
+                self.send_message("confirm_pickup", {"partner_id": self.carrying_with}, recipient_id=self.carrying_with)
+                self.state = "carrying_gold"
+                self.holding_gold = True
+                self.send_message("gold_collected", {"pos": self.target_gold_pos}, broadcast=True)
+
+        elif self.state == "carrying_gold":
+            deposit_pos = (0, 0) if self.group == 1 else (self.grid_size-1, self.grid_size-1)
+            if self.position == deposit_pos:
+                self.state = "at_deposit"
+            else:
+                self._move_towards(deposit_pos)
+
+        elif self.state == "at_deposit":
+            self.holding_gold = False
+            self.carrying_with = None
+            self.state = "idle"
+
+        self._execute_action(grid)
+
+    def _execute_action(self, grid):
+        if self.action == 'move':
+            self._move()
+        elif self.action == 'turn_left':
+            self._turn('left')
+        elif self.action == 'turn_right':
+            self._turn('right')
+
+    def _move(self):
+        x, y = self.position
+        if self.direction == 'N' and x-1 >= 0:
+            self.position = (x-1, y)
+        elif self.direction == 'S' and x+1 < self.grid_size:
+            self.position = (x+1, y)
+        elif self.direction == 'E' and y+1 < self.grid_size:
+            self.position = (x, y+1)
+        elif self.direction == 'W' and y-1 >= 0:
+            self.position = (x, y-1)
+
+    def _turn(self, direction):
+        dirs = ['N','E','S','W']
+        idx = dirs.index(self.direction)
+        if direction == 'left':
+            self.direction = dirs[(idx-1) % 4]
+        elif direction == 'right':
+            self.direction = dirs[(idx+1) % 4]
+
+    def _move_towards(self, target_pos):
+        path = []
+        dx = target_pos[0] - self.position[0]
+        dy = target_pos[1] - self.position[1]
+
+        if dx > 0: path.extend(['S'] * dx)
+        if dx < 0: path.extend(['N'] * -dx)
+        if dy > 0: path.extend(['E'] * dy)
+        if dy < 0: path.extend(['W'] * -dy)
+        
+        if path:
+            next_move = path[0]
+            if self.direction != next_move:
+                turn_action = self._get_turn_direction(self.direction, next_move)
+                if turn_action:
+                    self.action = turn_action
+            else:
+                self.action = 'move'
+
+    def _get_turn_direction(self, current_direction, target_direction):
+        dirs = ['N', 'E', 'S', 'W']
+        current_idx = dirs.index(current_direction)
+        target_idx = dirs.index(target_direction)
+
+        if current_idx == target_idx:
+            return None
+
+        if (current_idx + 1) % 4 == target_idx:
+            return 'turn_right'
+        else:
+            return 'turn_left'
+
+    def send_message(self, msg_type, content, broadcast=False, at_pos=None, recipient_id=None):
+        msg = {"sender_id": self.id, "type": msg_type, "content": content}
+        if broadcast:
+            msg["broadcast"] = True
+            if at_pos:
+                msg["at_pos"] = at_pos
+        if recipient_id is not None:
+            msg["recipient_id"] = recipient_id
+        self.message_outbox.append(msg)
+
+    def _process_messages(self, robots):
+        for msg in self.message_inbox:
+            msg_type = msg["type"]
+            content = msg["content"]
+            sender_id = msg["sender_id"]
+
+            if msg_type == "gold_location":
+                pos = tuple(content["pos"])
+                if pos not in self.known_gold_locations:
+                    self.known_gold_locations[pos] = "unknown"
+
+            elif msg_type == "claim_gold":
+                pos = tuple(content["pos"])
+                if pos in self.known_gold_locations:
+                    self.known_gold_locations[pos] = "claimed"
+
+            elif msg_type == "propose_pickup":
+                pos = tuple(content["pos"])
+                if self.state == "at_gold" and self.position == pos:
+                    self.send_message("accept_pickup", {"pos": pos}, recipient_id=sender_id)
+                    self.state = "waiting_for_partner"
+
+            elif msg_type == "accept_pickup":
+                pos = tuple(content["pos"])
+                if self.state == "waiting_for_partner" and self.position == pos:
+                    self.carrying_with = sender_id
+                    self.state = "forming_pair"
+
+            elif msg_type == "confirm_pickup":
+                self.carrying_with = content["partner_id"]
+                self.state = "carrying_gold"
+                self.holding_gold = True
+            
+            elif msg_type == "abandon_pickup":
+                pos = tuple(content["pos"])
+                if self.target_gold_pos == pos:
+                    self.state = "wandering"
+                    self.target_gold_pos = None
+
+            elif msg_type == "gold_collected":
+                pos = tuple(content["pos"])
+                if pos in self.known_gold_locations:
+                    self.known_gold_locations.pop(pos, None)
+                    if self.target_gold_pos == pos:
+                        self.state = "wandering"
+                        self.target_gold_pos = None
+
+        self.message_inbox = []
