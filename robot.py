@@ -46,6 +46,10 @@ class Robot:
         self._process_messages(robots)
         self.sense(grid)
 
+        if self.state == "idle":
+            self.state = "wandering"
+            self.action = random.choice(['move', 'turn_left', 'turn_right'])
+
         if self.state == "wandering":
             unclaimed_gold = [pos for pos, status in self.known_gold_locations.items() if status == "unknown"]
             if unclaimed_gold:
@@ -80,7 +84,7 @@ class Robot:
         
         elif self.state == "forming_pair":
             if self.id < self.carrying_with:
-                self.send_message("confirm_pickup", {"partner_id": self.carrying_with}, recipient_id=self.carrying_with)
+                self.send_message("confirm_pickup", {"partner_id": self.carrying_with, "pos": self.target_gold_pos}, recipient_id=self.carrying_with)
                 self.state = "carrying_gold"
                 self.holding_gold = True
                 self.send_message("gold_collected", {"pos": self.target_gold_pos}, broadcast=True)
@@ -95,7 +99,8 @@ class Robot:
         elif self.state == "at_deposit":
             self.holding_gold = False
             self.carrying_with = None
-            self.state = "idle"
+            self.state = "wandering"
+            self.action = random.choice(['move', 'turn_left', 'turn_right'])
 
         self._execute_action(grid)
 
@@ -198,6 +203,7 @@ class Robot:
 
             elif msg_type == "confirm_pickup":
                 self.carrying_with = content["partner_id"]
+                self.target_gold_pos = tuple(content["pos"])
                 self.state = "carrying_gold"
                 self.holding_gold = True
             

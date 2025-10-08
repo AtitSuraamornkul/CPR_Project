@@ -75,8 +75,9 @@ class Simulation:
                     self.scores[robot.group] += 1
                     robot.state = "idle"
                     robot.holding_gold = False
+                    partner_id = robot.carrying_with
                     robot.carrying_with = None
-                    partner = next((r for r in all_robots if r.id == robot.carrying_with), None)
+                    partner = next((r for r in all_robots if r.id == partner_id), None)
                     if partner:
                         partner.state = "idle"
                         partner.holding_gold = False
