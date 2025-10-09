@@ -232,32 +232,9 @@ class Robot:
             
             # Determine desired action to move towards deposit
             action = self._get_move_action_towards(deposit)
-            
-            if self.carrying_with is not None:
-                partner = self._get_partner(all_robots)
-                
-                # Only the lower ID robot proposes to avoid conflicts
-                if self.id < self.carrying_with:
-                    # Propose action
-                    proposal_id = self.get_next_proposal_number()
-                    self.message_outbox.append({
-                        "type": "propose_action",
-                        "sender_id": self.id,
-                        "recipient_id": self.carrying_with,
-                        "content": {"proposal_id": proposal_id, "action": action}
-                    })
-                    # Execute the action immediately (leader decides)
-                    return action
-                else:
-                    # Follower: use partner's agreed action if available
-                    if self.partner_agreed_action:
-                        action = self.partner_agreed_action
-                        self.partner_agreed_action = None
-                        return action
-                    else:
-                        # Wait for partner's proposal
-                        return "idle"
-            
+
+            # Both robots will calculate the same action since they are at the same
+            # position and have the same goal. No need for communication here.
             return action
         
         # STATE: ready_to_pickup - Both robots at gold, attempt pickup
@@ -416,7 +393,7 @@ class Robot:
                 robot.id != self.id and 
                 robot.state == "idle" and
                 not robot.holding_gold and
-                robot.carrying_with==None):
+                robot.carrying_with == None):
                 return robot
         return None
     
@@ -736,7 +713,7 @@ def main():
     group1 = []
     group2 = []
     
-    for i in range(2):
+    for i in range(10):
         # Group 1 robots start near top-left
         x = random.randint(0, 4)
         y = random.randint(0, 4)
