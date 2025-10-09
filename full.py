@@ -86,6 +86,11 @@ class Robot:
         self.highest_proposal_seen = -1
         self.accepted_proposal = -1
         self.accepted_value = None
+        self.paxos_role = 'follower'  # follower, leader
+        self.paxos_state = 'idle'  # idle, preparing, proposing, finished
+        self.promises_received = set()
+        self.accepts_received = set()
+        self.current_plan = None
         
         # Communication
         self.message_inbox: List[Dict] = []
@@ -146,65 +151,116 @@ class Robot:
     def process_messages(self, all_robots: List['Robot']):
         """Process incoming messages"""
         for msg in self.message_inbox:
-            if msg["type"] == "partner_request":
-                # Someone wants to partner with us
-                sender_id = msg["sender_id"]
-                gold_pos = tuple(msg["content"]["gold_pos"])
-                
-                # If we're idle or also targeting this gold, accept
-                if self.state in ["idle", "moving_to_gold", "waiting_at_gold"] and not self.holding_gold:
-                    self.carrying_with = sender_id
-                    self.target_gold_pos = gold_pos
-                    self.state = "moving_to_gold"
-                    # Send confirmation
+            msg_type = msg.get("type")
+            sender_id = msg.get("sender_id")
+            content = msg.get("content", {})
+
+            if msg_type == "paxos_prepare":
+                proposal_id = content.get("proposal_id")
+                if proposal_id >= self.highest_proposal_seen:
+                    self.highest_proposal_seen = proposal_id
+                    self.paxos_state = 'preparing' # Show we are engaged in a paxos round
+                    # Promise not to accept proposals with a lower number
                     self.message_outbox.append({
-                        "type": "partner_accept",
+                        "type": "paxos_promise",
                         "sender_id": self.id,
                         "recipient_id": sender_id,
-                        "content": {"gold_pos": gold_pos}
+                        "content": {
+                            "proposal_id": proposal_id,
+                            "accepted_proposal": self.accepted_proposal,
+                            "accepted_value": self.accepted_value
+                        }
                     })
+
+            elif msg_type == "paxos_promise":
+                if self.paxos_role == 'leader' and self.paxos_state == 'preparing':
+                    proposal_id = content.get("proposal_id")
+                    # Check if the promise is for the current proposal
+                    if proposal_id == self.highest_proposal_seen:
+                        self.promises_received.add(sender_id)
+
+                        # If a promise contains a previously accepted value, we must use it
+                        if content.get("accepted_proposal", -1) > self.accepted_proposal:
+                            self.accepted_proposal = content["accepted_proposal"]
+                            self.accepted_value = content["accepted_value"]
+                        
+                        # Check for majority
+                        num_teammates = sum(1 for r in all_robots if r.group == self.group)
+                        if len(self.promises_received) > num_teammates / 2:
+                            self.paxos_state = 'proposing'
+                            # Send ACCEPT message to all teammates
+                            for robot in all_robots:
+                                if robot.group == self.group:
+                                    self.message_outbox.append({
+                                        "type": "paxos_accept",
+                                        "sender_id": self.id,
+                                        "recipient_id": robot.id,
+                                        "content": {
+                                            "proposal_id": self.highest_proposal_seen,
+                                            "value": self.accepted_value
+                                        }
+                                    })
             
-            elif msg["type"] == "partner_accept":
-                # Partner accepted our request
-                if not self.holding_gold:
-                    self.carrying_with = msg["sender_id"]
-                    self.state = "moving_to_gold"
+            elif msg_type == "paxos_accept":
+                proposal_id = content.get("proposal_id")
+                if proposal_id >= self.highest_proposal_seen:
+                    self.accepted_proposal = proposal_id
+                    self.accepted_value = content.get("value")
+                    self.paxos_state = 'proposing' # Engaged in this proposal
+                    self.message_outbox.append({
+                        "type": "paxos_accepted",
+                        "sender_id": self.id,
+                        "recipient_id": sender_id,
+                        "content": {"proposal_id": proposal_id}
+                    })
+
+            elif msg_type == "paxos_accepted":
+                if self.paxos_role == 'leader' and self.paxos_state == 'proposing':
+                    proposal_id = content.get("proposal_id")
+                    if proposal_id == self.highest_proposal_seen:
+                        self.accepts_received.add(sender_id)
+                        
+                        num_teammates = sum(1 for r in all_robots if r.group == self.group)
+                        if len(self.accepts_received) > num_teammates / 2:
+                            # PLAN IS COMMITTED
+                            self.paxos_state = 'finished'
+                            self.current_plan = self.accepted_value
+                            
+                            # Broadcast commit message
+                            for robot in all_robots:
+                                if robot.group == self.group:
+                                    self.message_outbox.append({
+                                        "type": "paxos_commit",
+                                        "sender_id": self.id,
+                                        "recipient_id": robot.id,
+                                        "content": {"plan": self.current_plan}
+                                    })
+                            
+                            # Reset for next round
+                            self.paxos_role = 'follower'
+                            self.promises_received = set()
+                            self.accepts_received = set()
+
+            elif msg_type == "paxos_commit":
+                self.current_plan = content.get("plan")
+                self.paxos_state = 'idle' # Ready for plan execution or next round
+                # The logic in decide_action will now pick up this plan
             
-            elif msg["type"] == "at_gold":
+            elif msg_type == "at_gold":
                 # Partner has reached the gold
-                if msg["sender_id"] == self.carrying_with:
+                if sender_id == self.carrying_with:
                     if self.position == self.target_gold_pos:
                         self.state = "ready_to_pickup"
             
-            elif msg["type"] == "ready_pickup":
+            elif msg_type == "ready_pickup":
                 # Partner is ready to pickup
-                if msg["sender_id"] == self.carrying_with:
-                    if self.position == self.target_gold_pos and self.position == tuple(msg["content"]["pos"]):
+                if sender_id == self.carrying_with:
+                    if self.position == self.target_gold_pos and self.position == tuple(content["pos"]):
                         self.state = "ready_to_pickup"
             
-            elif msg["type"] == "propose_action":
-                # Partner proposing an action (Paxos) - accept and store it
-                proposal_id = msg["content"]["proposal_id"]
-                action = msg["content"]["action"]
-                
-                if proposal_id >= self.highest_proposal_seen and msg["sender_id"] == self.carrying_with:
-                    self.highest_proposal_seen = proposal_id
-                    self.partner_agreed_action = action
-                    # Automatically accept partner's proposal
-                    self.message_outbox.append({
-                        "type": "accept_action",
-                        "sender_id": self.id,
-                        "recipient_id": msg["sender_id"],
-                        "content": {"proposal_id": proposal_id, "action": action}
-                    })
-            
-            elif msg["type"] == "accept_action":
-                # Partner accepted our proposed action (not needed for leader-follower)
-                pass
-            
-            elif msg["type"] == "drop_gold":
+            elif msg_type == "drop_gold":
                 # Partner dropped the gold (moved wrong direction)
-                if msg["sender_id"] == self.carrying_with:
+                if sender_id == self.carrying_with:
                     self.holding_gold = False
                     self.carrying_with = None
                     self.state = "idle"
@@ -349,30 +405,61 @@ class Robot:
             # Move towards gold
             return self._get_move_action_towards(self.target_gold_pos)
         
-        # STATE: idle - Search for gold
+        # STATE: idle - Search for gold or participate in Paxos
         if self.state == "idle":
-            # Look for gold in observed positions
-            if self.observed_gold:
-                # Pick closest gold
-                target = min(self.observed_gold, 
-                           key=lambda g: abs(g[0]-self.position[0]) + abs(g[1]-self.position[1]))
-                self.target_gold_pos = target
+            # Part 1: Check if we have a committed plan to execute
+            if self.current_plan and self.id in self.current_plan:
+                assignment = self.current_plan[self.id]
                 self.state = "moving_to_gold"
+                self.target_gold_pos = assignment["gold_pos"]
+                self.carrying_with = assignment["partner_id"]
+                self.paxos_state = 'idle' # Reset for next round
+                self.current_plan = None  # Consume the plan
+                return self._get_move_action_towards(self.target_gold_pos)
+
+            # Part 2: Leader Election and Proposal
+            idle_teammates = [r for r in all_robots if r.group == self.group and r.state == 'idle' and r.paxos_state == 'idle']
+            if not idle_teammates:
+                return "idle" # No one is available to form a plan
+
+            leader = min(idle_teammates, key=lambda r: r.id)
+
+            if self.id == leader.id and self.observed_gold:
+                # I am the leader and I see gold, let's make a plan.
+                self.paxos_role = 'leader'
+                self.paxos_state = 'preparing'
+
+                # Simple plan: pair leader with the next available robot for the closest gold
+                other_idle = [r for r in idle_teammates if r.id != self.id]
+                if other_idle:
+                    partner = other_idle[0]
+                    target = min(self.observed_gold, 
+                               key=lambda g: abs(g[0]-self.position[0]) + abs(g[1]-self.position[1]))
+                    
+                    # Plan is a mapping from robot_id to its assignment
+                    plan = {
+                        self.id: {"partner_id": partner.id, "gold_pos": target},
+                        partner.id: {"partner_id": self.id, "gold_pos": target}
+                    }
+                    
+                    proposal_id = self.get_next_proposal_number()
+                    self.highest_proposal_seen = proposal_id
+                    self.accepted_value = plan # Tentatively accept our own plan
+
+                    # Send PREPARE message to all teammates
+                    for robot in all_robots:
+                        if robot.group == self.group and robot.id != self.id:
+                            self.message_outbox.append({
+                                "type": "paxos_prepare",
+                                "sender_id": self.id,
+                                "recipient_id": robot.id,
+                                "content": {"proposal_id": proposal_id}
+                            })
+                    self.promises_received = {self.id} # We implicitly promise ourselves
                 
-                # Look for available partner
-                partner = self._find_available_partner(all_robots)
-                if partner:
-                    self.carrying_with = partner.id
-                    # Send partner request
-                    self.message_outbox.append({
-                        "type": "partner_request",
-                        "sender_id": self.id,
-                        "recipient_id": partner.id,
-                        "content": {"gold_pos": target}
-                    })
-                
-                return self._get_move_action_towards(target)
-            
+                return "idle" # Wait for promises
+
+            # Part 3: Default behavior if not leading or no plan
             # Random exploration
             if random.random() < 0.2:
                 return random.choice(["turn_left", "turn_right"])
@@ -385,17 +472,6 @@ class Robot:
         if self.carrying_with is None:
             return None
         return next((r for r in all_robots if r.id == self.carrying_with), None)
-    
-    def _find_available_partner(self, all_robots: List['Robot']) -> Optional['Robot']:
-        """Find an available teammate"""
-        for robot in all_robots:
-            if (robot.group == self.group and 
-                robot.id != self.id and 
-                robot.state == "idle" and
-                not robot.holding_gold and
-                robot.carrying_with == None):
-                return robot
-        return None
     
     def _get_move_action_towards(self, target: Tuple[int, int]) -> str:
         """Get action to move towards target"""
@@ -729,7 +805,7 @@ def main():
         group2.append(robot)
     
     # Run simulation
-    sim = Simulation(grid, group1, group2, steps=500)
+    sim = Simulation(grid, group1, group2, steps=5000)
     sim.run()
 
 if __name__ == "__main__":
