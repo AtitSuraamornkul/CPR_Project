@@ -92,6 +92,9 @@ class Robot:
         self.accepts_received = set()
         self.current_plan = None
         
+        # State-related timers
+        self.wait_timer = 0
+
         # Communication
         self.message_inbox: List[Dict] = []
         self.message_outbox: List[Dict] = []
@@ -295,53 +298,28 @@ class Robot:
         
         # STATE: ready_to_pickup - Both robots at gold, attempt pickup
         if self.state == "ready_to_pickup":
-            # Verify we're at the target gold position
-            if self.position != self.target_gold_pos:
-                self.state = "moving_to_gold"
-                return self._get_move_action_towards(self.target_gold_pos)
-            
-            partner = self._get_partner(all_robots)
-            if partner and partner.position == self.position and partner.position == self.target_gold_pos:
-                # Check if partner is also ready OR at least waiting at gold
-                if partner.state in ["ready_to_pickup", "waiting_at_gold"]:
-                    # If partner is waiting, send ready signal again
-                    if partner.state == "waiting_at_gold":
-                        self.message_outbox.append({
-                            "type": "ready_pickup",
-                            "sender_id": self.id,
-                            "recipient_id": self.carrying_with,
-                            "content": {"pos": self.position}
-                        })
-                        # Wait for partner to become ready
-                        return "idle"
-                    else:
-                        # Both ready, attempt pickup
-                        print(f"DEBUG: R{self.id} and R{partner.id} both ready at {self.position}, attempting pickup")
-                        return "pickup"
-                else:
-                    # Partner not in valid state
-                    return "idle"
-            else:
-                # Partner not at same position, go back to waiting
-                if partner:
-                    print(f"DEBUG: R{self.id} ready but partner R{self.carrying_with} not at same position. Me:{self.position}, Partner:{partner.position}")
-                else:
-                    print(f"DEBUG: R{self.id} ready but partner R{self.carrying_with} not found")
-                self.state = "waiting_at_gold"
-                return "idle"
+            # Unconditionally attempt to pickup. The simulation's rules will
+            # verify that the partner is also present and ready.
+            # This avoids state-checking race conditions between robots.
+            return "pickup"
         
         # STATE: waiting_at_gold - At gold position, waiting for partner
         if self.state == "waiting_at_gold":
+            self.wait_timer += 1
+
             # Check if we're actually at the target gold position
             if self.position != self.target_gold_pos:
                 # Not at target yet, keep moving
                 self.state = "moving_to_gold"
+                self.wait_timer = 0
                 return self._get_move_action_towards(self.target_gold_pos)
             
+            # Check if partner has arrived
             partner = self._get_partner(all_robots)
             if partner and partner.position == self.position:
                 # Partner arrived! Transition to ready
                 self.state = "ready_to_pickup"
+                self.wait_timer = 0
                 # Notify partner we're ready
                 self.message_outbox.append({
                     "type": "ready_pickup",
@@ -349,11 +327,6 @@ class Robot:
                     "recipient_id": self.carrying_with,
                     "content": {"pos": self.position}
                 })
-                
-                # If partner is already ready, we can pickup next turn
-                if partner.state == "ready_to_pickup":
-                    print(f"DEBUG: R{self.id} became ready, partner R{partner.id} already ready at {self.position}")
-                
                 return "idle"
             
             # Check if gold still there
@@ -363,6 +336,20 @@ class Robot:
                 self.state = "idle"
                 self.carrying_with = None
                 self.target_gold_pos = None
+                self.paxos_state = 'idle'
+                self.wait_timer = 0
+                return "idle"
+
+            # Check for timeout
+            if self.wait_timer > 20:
+                print(f"DEBUG: R{self.id} timed out waiting for partner at {self.target_gold_pos}, resetting.")
+                # Give up and go back to idle
+                self.state = "idle"
+                self.carrying_with = None
+                self.target_gold_pos = None
+                self.paxos_state = 'idle'
+                self.wait_timer = 0
+                return "idle"
             
             return "idle"
         
