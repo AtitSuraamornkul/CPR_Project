@@ -412,23 +412,32 @@ class Robot:
             leader = min(idle_teammates, key=lambda r: r.id)
 
             if self.id == leader.id and self.observed_gold:
-                # I am the leader and I see gold, let's make a plan.
+                # I am the leader and I see gold, let's make a smarter plan.
                 self.paxos_role = 'leader'
                 self.paxos_state = 'preparing'
 
-                # Simple plan: pair leader with the next available robot for the closest gold
-                other_idle = [r for r in idle_teammates if r.id != self.id]
-                if other_idle:
-                    partner = other_idle[0]
-                    target = min(self.observed_gold, 
-                               key=lambda g: abs(g[0]-self.position[0]) + abs(g[1]-self.position[1]))
+                # --- Smarter Plan Creation ---
+                available_robots = list(idle_teammates)
+                available_gold = set(self.observed_gold)
+                plan = {}
+
+                while len(available_robots) >= 2 and available_gold:
+                    # Create a pair
+                    robot1 = available_robots.pop(0)
+                    robot2 = available_robots.pop(0)
                     
-                    # Plan is a mapping from robot_id to its assignment
-                    plan = {
-                        self.id: {"partner_id": partner.id, "gold_pos": target},
-                        partner.id: {"partner_id": self.id, "gold_pos": target}
-                    }
-                    
+                    # Find the closest available gold for this pair and assign it
+                    # (based on robot1's position for simplicity)
+                    target_gold = min(available_gold, 
+                                      key=lambda g: abs(g[0]-robot1.position[0]) + abs(g[1]-robot1.position[1]))
+                    available_gold.remove(target_gold)
+
+                    # Add the assignment for both robots to the plan
+                    plan[robot1.id] = {"partner_id": robot2.id, "gold_pos": target_gold}
+                    plan[robot2.id] = {"partner_id": robot1.id, "gold_pos": target_gold}
+                # --- End of Smarter Plan Creation ---
+
+                if plan:
                     proposal_id = self.get_next_proposal_number()
                     self.highest_proposal_seen = proposal_id
                     self.accepted_value = plan # Tentatively accept our own plan
@@ -536,7 +545,8 @@ class Simulation:
         self.pickup_counts = {1: 0, 2: 0}
 
     def run(self):
-        for step in range(self.steps):
+        step = 0
+        while step < self.steps:
             print(f"\nStep {step+1}")
             print("=" * 40)
             all_robots = self.group1 + self.group2
@@ -557,15 +567,22 @@ class Simulation:
             # Print robot states
             states = []
             for r in all_robots:
-                states.append(f"R{r.id}@{r.position}: {r.state}, partner={r.carrying_with}, gold={r.holding_gold}, target={r.target_gold_pos}")
+                states.append(f"R{r.id}@{r.position}: {r.state}, partner={r.carrying_with}, gold={r.holding_gold}, target={r.target_gold_pos}, paxos_state={r.paxos_state}")
             print(f"Robot details:")
             for s in states:
                 print(f"  {s}")
             print(f"Scores - Group 1: {self.scores[1]}, Group 2: {self.scores[2]}")
             print(f"Pickups - Group 1: {self.pickup_counts[1]}, Group 2: {self.pickup_counts[2]}")
 
+            # Check for end condition
+            if self.scores[1] + self.scores[2] >= self.grid.num_gold:
+                print("\nAll gold has been deposited! Ending simulation.")
+                break
+
             if step < self.steps - 1:
                 time.sleep(0.15)
+            
+            step += 1
         
         self._print_final_results()
 
