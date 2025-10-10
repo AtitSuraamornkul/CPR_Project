@@ -1,5 +1,4 @@
 import random
-
 from grid import Grid
 from robot import Robot
 from simulation import Simulation
@@ -12,7 +11,6 @@ def main():
     group1 = []
     group2 = []
     
-    # Create 10 robots per group as per the README
     for i in range(10):
         # Group 1 robots start near top-left
         x = random.randint(0, 4)
@@ -25,11 +23,11 @@ def main():
         x = random.randint(15, 19)
         y = random.randint(15, 19)
         direction = random.choice(['N', 'S', 'E', 'W'])
-        robot = Robot(i + 10, 2, (x, y), direction) # Use i+20 for unique IDs to be safe
+        robot = Robot(i + 10, 2, (x, y), direction)
         group2.append(robot)
     
-    # Run simulation with a high step count as a safety cutoff
-    sim = Simulation(grid, group1, group2, steps=2000)
+    # Run simulation
+    sim = Simulation(grid, group1, group2, steps=5000)
     sim.run()
 
 if __name__ == "__main__":

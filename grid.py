@@ -1,5 +1,5 @@
-import random
 import numpy as np
+import random
 
 class Grid:
     def __init__(self, size=20, num_gold=30):

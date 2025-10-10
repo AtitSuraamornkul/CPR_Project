@@ -1,13 +1,9 @@
 import time
 from collections import defaultdict
-from typing import List
-
-from grid import Grid
-from robot import Robot
 from utils import strip_ansi
 
 class Simulation:
-    def __init__(self, grid: Grid, group1: List[Robot], group2: List[Robot], steps=500):
+    def __init__(self, grid, group1, group2, steps=500):
         self.grid = grid
         self.group1 = group1
         self.group2 = group2
@@ -22,20 +18,15 @@ class Simulation:
             print("=" * 40)
             all_robots = self.group1 + self.group2
 
-            # Process messages
             self._process_messages(all_robots)
 
-            # Update all robots (observe, decide)
             for robot in all_robots:
-                robot.update(self.grid.grid, all_robots)
+                robot.update(self.grid.grid)
 
-            # Execute actions and handle game mechanics
             self._execute_actions(all_robots)
 
-            # Print grid view
             self._print_grid()
             
-            # Print robot states
             states = []
             for r in all_robots:
                 states.append(f"R{r.id}@{r.position}: {r.state}, partner={r.carrying_with}, gold={r.holding_gold}, target={r.target_gold_pos}, paxos_state={r.paxos_state}")
@@ -51,13 +42,13 @@ class Simulation:
                 break
 
             if step < self.steps - 1:
-                time.sleep(0.15)
+               time.sleep(0.15)
             
             step += 1
         
         self._print_final_results()
 
-    def _process_messages(self, all_robots: List[Robot]):
+    def _process_messages(self, all_robots):
         """Deliver messages between robots"""
         messages_to_deliver = []
         for robot in all_robots:
@@ -81,7 +72,7 @@ class Simulation:
                 elif "recipient_id" in msg and robot.id == msg["recipient_id"]:
                     robot.message_inbox.append(msg)
 
-    def _execute_actions(self, all_robots: List[Robot]):
+    def _execute_actions(self, all_robots):
         """Execute robot actions and handle game mechanics"""
         
         # Group pickup attempts by position

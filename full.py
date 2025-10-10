@@ -489,8 +489,8 @@ class Simulation:
                 print("\nAll gold has been deposited! Ending simulation.")
                 break
 
-            #if step < self.steps - 1:
-            #   time.sleep(0.15)
+            if step < self.steps - 1:
+               time.sleep(0.15)
             
             step += 1
         
