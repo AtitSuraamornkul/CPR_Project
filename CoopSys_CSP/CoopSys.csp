@@ -1,0 +1,103 @@
+-- Copyright (c) 2021  Yoshinao Isobe
+-- National Institute of Advanced Industrial Science and Technology (AIST)
+-- 2021/09/27
+
+include "RoboMng_fsm.csp"
+include "RoboCtrl_fsm.csp"
+include "RaspberryPiMouse_fsm.csp"
+include "Client_fsm.csp"
+include "CoopSys_spec.csp"
+include "RTM_compo.csp"
+include "RTM_spec.csp"
+
+-- -----------------------------------
+-- Definition of messages
+-- -----------------------------------
+
+PosMax = 3
+PosHome = 0
+PosGoal = 2  
+PosBox(1) = 3
+PosBox(2) = 1
+
+Low = 0
+Full = 1
+Thr = 1
+V = 1
+
+-- Global definitions for RTC
+
+RTC_max = 7
+
+datatype RTC_ev
+ = comp | new | start | ready | dest.Arvs | arrive.Arvs
+ | full | low | cancel
+ | velocity.Vels | pose.Poss | position.Poss | sensor.Sens
+
+  datatype Arvs = Box | Goal | Home | Prm
+  Poss = { PosHome..PosMax } 
+  Vels = { -V..V }
+  Sens = { 0..Thr }
+
+datatype RTC_msg
+  =   APPROACH.IDs | READY.IDs | TRANSPORT.IDs | RETURN.IDs | CHARGE.IDs
+
+  IDs = {1,2}
+
+-- nametype RTC_msg
+-- = Robo_msg.{1,2}
+
+--  datatype Robo_msg
+--   = APPROACH | READY | TRANSPORT | RETURN | CHARGE
+
+-- -----------------------------------
+-- Declare FSMs
+-- -----------------------------------
+
+FSM(1) = RoboMng(1)
+FSM(2) = RoboMng(2)
+FSM(3) = RoboCtrl
+FSM(4) = RoboCtrl
+FSM(5) = RaspberryPiMouse(1)
+FSM(6) = RaspberryPiMouse(2)
+FSM(7) = Client
+
+-- -----------------------------------
+-- Configuration
+-- -----------------------------------
+
+Link(1,2) = {| ready,cancel,comp |}
+Link(1,3) = {| dest,start |}
+Link(3,1) = {| arrive,low,full |}
+Link(3,5) = {| velocity,pose |}
+Link(5,3) = {| position,sensor |}
+Link(7,1) = {| new,start |}
+Link(1,7) = {| comp |}
+
+Link(2,1) = {| ready,cancel,comp |}
+Link(2,4) = {| dest,start |}
+Link(4,2) = {| arrive,low,full |}
+Link(4,6) = {| velocity,pose |}
+Link(6,4) = {| position,sensor |}
+Link(7,2) = {| new,start |}
+Link(2,7) = {| comp |}
+
+Link(_,_) = {}
+
+-- -----------------------------------
+-- Composition
+-- -----------------------------------
+
+CoopSys = RTM_compo(FSM, Link, 4, False)
+CoopSys_ow = RTM_compo(FSM, Link, 4, True)
+
+-- -----------------------------------
+-- verification 
+-- -----------------------------------
+
+assert SafeSpec [T= CoopSys
+assert CoopSys \ {tock} [T= TestCase
+assert CoopSys \ {|obs|} :[deadlock free [F]]
+assert CoopSys \ {|obs|} :[livelock free [FD]]
+assert CoopSys [T= CoopSys_ow
+

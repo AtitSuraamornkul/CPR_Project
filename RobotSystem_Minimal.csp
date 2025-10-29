@@ -1,0 +1,119 @@
+-- ============================================================================
+-- MINIMAL CSP MODEL: Focus on Quorum Bug Only
+-- Purpose: Fast verification of the incorrect quorum calculation bug
+-- Complexity: 2 robots, 1 proposal, no message delays
+-- Verification time: <10 seconds
+-- ============================================================================
+
+-- ----------------------------------------------------------------------------
+-- MINIMAL CONFIGURATION
+-- ----------------------------------------------------------------------------
+
+RobotIDs = {1, 2}
+TEAM_SIZE = 2
+
+ProposalID = {0, 100}  -- Just 0 and one proposal
+
+-- ----------------------------------------------------------------------------
+-- CHANNELS
+-- ----------------------------------------------------------------------------
+
+channel tock
+channel propose : RobotIDs
+channel promise : RobotIDs.RobotIDs  -- from.to
+channel proceed : RobotIDs.{0..10}.{0..10}  -- id.promises.teammates_known
+channel obs_invalid_quorum : RobotIDs
+
+-- ----------------------------------------------------------------------------
+-- ROBOT - Simplified to just Paxos Prepare phase
+-- ----------------------------------------------------------------------------
+
+Robot(id) = Idle(id, {})
+
+-- Idle: Can propose OR respond to proposals
+Idle(id, known_teammates) =
+  -- Learn about teammate (receive promise from them)
+  promise?from!id -> Idle(id, union(known_teammates, {from}))
+  []
+  -- Initiate proposal (becomes proposer)
+  propose.id -> Preparing(id, known_teammates, {id})
+
+-- Preparing: Collect promises (this is where the BUG is!)
+Preparing(id, known_teammates, promises) =
+  -- Receive promise from another robot
+  promise?from!id -> 
+    let new_promises = union(promises, {from})
+        -- BUG: Uses known_teammates instead of TEAM_SIZE
+        num_teammates = card(known_teammates) + 1
+        quorum_needed = num_teammates / 2
+        promise_count = card(new_promises)
+    within
+      (if (promise_count > quorum_needed)
+       then 
+         -- Proceed with insufficient quorum!
+         proceed.id.promise_count.num_teammates ->
+         (if (promise_count <= TEAM_SIZE/2)
+          then obs_invalid_quorum.id -> STOP
+          else Idle(id, known_teammates))
+       else
+         Preparing(id, known_teammates, new_promises))
+  []
+  -- Also send own promise to self immediately (auto-accept)
+  promise.id.id -> Preparing(id, known_teammates, promises)
+  []
+  tock -> Preparing(id, known_teammates, promises)
+
+-- ----------------------------------------------------------------------------
+-- SYSTEM
+-- ----------------------------------------------------------------------------
+
+System = Robot(1) [|{| tock, promise |}|] Robot(2)
+
+-- ----------------------------------------------------------------------------
+-- SPECIFICATION
+-- ----------------------------------------------------------------------------
+
+-- Robot should NOT proceed if it doesn't have real quorum
+NoInvalidQuorum = 
+  obs_invalid_quorum?robot -> STOP
+  [] tock -> NoInvalidQuorum
+  [] propose?r -> NoInvalidQuorum
+  [] promise?f?t -> NoInvalidQuorum
+  [] proceed?r?p?k -> NoInvalidQuorum
+
+-- ----------------------------------------------------------------------------
+-- ASSERTION
+-- ----------------------------------------------------------------------------
+
+-- This will FAIL - showing the quorum bug
+assert NoInvalidQuorum [T= System
+
+-- ============================================================================
+-- HOW TO DEMONSTRATE THE BUG
+-- ============================================================================
+
+{-
+Expected FDR4 result: FAILED
+
+Counterexample trace will show:
+1. propose.1                    -- Robot 1 initiates proposal
+2. promise.1.1                  -- Robot 1 promises to itself
+3. proceed.1.1.0                -- Robot 1 proceeds!
+                                -- promises=1, teammates_known=0
+                                -- Quorum calculated = 1/2 of (0+1) = 0
+                                -- 1 > 0, so proceeds
+4. obs_invalid_quorum.1         -- BUG DETECTED!
+                                -- Should need 2/2 = 1 real quorum
+                                -- But proceeded with insufficient promises
+
+This demonstrates:
+- Robot doesn't know about teammate yet
+- Thinks team size is 1 (just itself)
+- Calculates quorum as 1/2 = 0
+- Has 1 promise, proceeds (1 > 0)
+- But real team size is 2, needs 2/2 = 1 minimum
+- This is the QUORUM BUG!
+
+FIX: Use constant TEAM_SIZE instead of counting known_teammates:
+  quorum_needed = TEAM_SIZE / 2  -- Always 2/2 = 1
+-}

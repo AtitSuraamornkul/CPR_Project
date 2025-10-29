@@ -1,0 +1,87 @@
+-- ============================================================================
+-- QUORUM BUG DEMONSTRATION - Corrected Version
+-- This WILL fail and show the bug clearly
+-- ============================================================================
+
+TEAM_SIZE = 3  -- Actual team has 3 robots
+
+-- Channels
+channel bug_detected
+channel system_proceed : {0..10}.{0..10}  -- promises, known_teammates
+
+-- ============================================================================
+-- BUGGY IMPLEMENTATION (Current Python Code Logic)
+-- ============================================================================
+
+BuggyRobot = 
+  let 
+    known_teammates = 0  -- Doesn't know about teammates yet!
+    promises_received = 1  -- Only has own promise
+    
+    -- BUG: Calculate quorum based on incomplete information
+    num_teammates = known_teammates + 1  -- = 0 + 1 = 1 (WRONG! Real team is 3)
+    quorum_needed = num_teammates / 2     -- = 1 / 2 = 0
+    
+    real_quorum = TEAM_SIZE / 2  -- = 3 / 2 = 1 (what it SHOULD be)
+  within
+    -- Robot checks if it has "enough" promises
+    (if (promises_received > quorum_needed)  -- 1 > 0 = TRUE (proceeds)
+     then 
+       system_proceed.promises_received.known_teammates ->
+       -- Check if this was actually valid
+       (if (promises_received <= real_quorum)  -- 1 <= 1 = TRUE (invalid!)
+        then bug_detected -> STOP  -- BUG!
+        else STOP)  -- Would be OK
+     else 
+       STOP)  -- Didn't proceed
+
+-- ============================================================================
+-- SPECIFICATION: System should never detect a bug
+-- ============================================================================
+
+NoBugs = 
+  system_proceed?p?k -> NoBugs  -- OK to proceed
+  [] bug_detected -> STOP  -- NOT OK - bug detected!
+
+-- ============================================================================
+-- ASSERTION - This WILL FAIL
+-- ============================================================================
+
+assert NoBugs [T= BuggyRobot
+
+-- ============================================================================
+-- EXPECTED RESULT
+-- ============================================================================
+
+{-
+FDR4 Result: ✗ FAILED
+
+Counterexample trace:
+1. system_proceed.1.0
+   - Robot proceeds with 1 promise
+   - Robot knows 0 teammates
+   
+2. bug_detected
+   - System detects this was invalid!
+   - Robot calculated quorum = 0 (based on knowing 0 teammates)
+   - Robot has 1 promise > 0, so proceeded
+   - But real quorum for team of 3 is 1
+   - Robot needs MORE than 1 promise (needs at least 2)
+   - BUG DEMONSTRATED!
+
+Explanation:
+- Robot thinks team size = 1 (self only)
+- Calculates quorum = 0
+- Has 1 promise, proceeds
+- But actual team size = 3
+- Real quorum = 1, needs > 1 promises
+- Should NOT have proceeded!
+
+This is EXACTLY the bug in full.py lines 185-186:
+  num_teammates = len(self.teammate_states) + 1  # WRONG!
+  if len(self.promises_received) > num_teammates / 2:
+
+FIX:
+  num_teammates = TEAM_SIZE  # Use constant!
+  if len(self.promises_received) > num_teammates / 2:
+-}

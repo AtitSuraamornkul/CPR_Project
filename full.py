@@ -2,7 +2,7 @@ import random
 import time
 import numpy as np
 from enum import Enum
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Any
 from dataclasses import dataclass
 from collections import defaultdict
 
@@ -24,9 +24,9 @@ class PaxosMessage:
     msg_type: str  # 'prepare', 'promise', 'accept', 'accepted'
     proposal_id: int
     sender_id: int
-    value: Optional[any] = None
+    value: Optional[Any] = None
     accepted_id: Optional[int] = None
-    accepted_value: Optional[any] = None
+    accepted_value: Optional[Any] = None
 
 class Grid:
     def __init__(self, size=20, num_gold=30):
@@ -81,16 +81,16 @@ class Robot:
         self.target_gold_pos: Optional[Tuple[int, int]] = None
         self.next_action: Optional[str] = None
         
-        # Paxos state
+        # Paxos state (fully decentralized - no leader role)
         self.proposal_number = 0
         self.highest_proposal_seen = -1
         self.accepted_proposal = -1
         self.accepted_value = None
-        self.paxos_role = 'follower'  # follower, leader
         self.paxos_state = 'idle'  # idle, preparing, proposing, finished
         self.promises_received = set()
         self.accepts_received = set()
         self.current_plan = None
+        self.proposal_backoff = 0  # Backoff timer before proposing again
 
         # State-related timers
         self.wait_timer = 0
@@ -173,7 +173,8 @@ class Robot:
                     })
 
             elif msg_type == "paxos_promise":
-                if self.paxos_role == 'leader' and self.paxos_state == 'preparing':
+                # Any robot initiating a proposal can receive promises
+                if self.paxos_state == 'preparing':
                     proposal_id = content.get("proposal_id")
                     if proposal_id == self.highest_proposal_seen:
                         self.promises_received.add(sender_id)
@@ -211,7 +212,8 @@ class Robot:
                     })
 
             elif msg_type == "paxos_accepted":
-                if self.paxos_role == 'leader' and self.paxos_state == 'proposing':
+                # Any robot proposing can receive accepts
+                if self.paxos_state == 'proposing':
                     proposal_id = content.get("proposal_id")
                     if proposal_id == self.highest_proposal_seen:
                         self.accepts_received.add(sender_id)
@@ -230,13 +232,14 @@ class Robot:
                                     "content": {"plan": self.current_plan}
                                 })
                             
-                            self.paxos_role = 'follower'
                             self.promises_received = set()
                             self.accepts_received = set()
+                            self.proposal_backoff = 0
 
             elif msg_type == "paxos_commit":
                 self.current_plan = content.get("plan")
                 self.paxos_state = 'idle'
+                self.proposal_backoff = 0  # Reset backoff when plan received
             
             elif msg_type == "at_gold":
                 if sender_id == self.carrying_with:
@@ -332,6 +335,7 @@ class Robot:
             return self._get_move_action_towards(self.target_gold_pos)
         
         if self.state == "idle":
+            # Execute plan if we have one
             if self.current_plan and self.id in self.current_plan:
                 assignment = self.current_plan[self.id]
                 self.state = "moving_to_gold"
@@ -341,40 +345,54 @@ class Robot:
                 self.current_plan = None
                 return self._get_move_action_towards(self.target_gold_pos)
 
-            idle_teammate_ids = [r_id for r_id, r_state in self.teammate_states.items() if r_state.get("state") == 'idle' and r_state.get("paxos_state") == 'idle']
+            # Decrement backoff timer
+            if self.proposal_backoff > 0:
+                self.proposal_backoff -= 1
+
+            # DECENTRALIZED: Any idle robot can propose when they see gold
+            idle_teammate_ids = [r_id for r_id, r_state in self.teammate_states.items() 
+                               if r_state.get("state") == 'idle' and r_state.get("paxos_state") == 'idle']
             all_idle_ids = idle_teammate_ids + [self.id] if self.paxos_state == 'idle' else idle_teammate_ids
 
             if not all_idle_ids:
                 return "move"
 
-            leader_id = min(all_idle_ids)
+            # Any robot can initiate proposal if they observe gold and backoff has expired
+            if self.observed_gold and self.paxos_state == 'idle' and self.proposal_backoff == 0:
+                # Random chance to propose (reduces simultaneous proposals)
+                if random.random() < 0.3:  # 30% chance to initiate
+                    self.paxos_state = 'preparing'
+                    available_robot_ids = all_idle_ids.copy()
+                    available_gold = set(self.observed_gold)
+                    plan = {}
 
-            if self.id == leader_id and self.observed_gold:
-                self.paxos_role = 'leader'
-                self.paxos_state = 'preparing'
-                available_robot_ids = all_idle_ids
-                available_gold = set(self.observed_gold)
-                plan = {}
+                    while len(available_robot_ids) >= 2 and available_gold:
+                        robot1_id = available_robot_ids.pop(0)
+                        robot2_id = available_robot_ids.pop(0)
+                        robot1_pos = self.position
+                        target_gold = min(available_gold, key=lambda g: abs(g[0]-robot1_pos[0]) + abs(g[1]-robot1_pos[1]))
+                        available_gold.remove(target_gold)
+                        plan[robot1_id] = {"partner_id": robot2_id, "gold_pos": target_gold}
+                        plan[robot2_id] = {"partner_id": robot1_id, "gold_pos": target_gold}
 
-                while len(available_robot_ids) >= 2 and available_gold:
-                    robot1_id = available_robot_ids.pop(0)
-                    robot2_id = available_robot_ids.pop(0)
-                    robot1_pos = self.position
-                    target_gold = min(available_gold, key=lambda g: abs(g[0]-robot1_pos[0]) + abs(g[1]-robot1_pos[1]))
-                    available_gold.remove(target_gold)
-                    plan[robot1_id] = {"partner_id": robot2_id, "gold_pos": target_gold}
-                    plan[robot2_id] = {"partner_id": robot1_id, "gold_pos": target_gold}
+                    if plan:
+                        proposal_id = self.get_next_proposal_number()
+                        self.highest_proposal_seen = proposal_id
+                        self.accepted_value = plan
+                        for teammate_id in self.teammate_states.keys():
+                            self.message_outbox.append({
+                                "type": "paxos_prepare", 
+                                "sender_id": self.id, 
+                                "recipient_id": teammate_id, 
+                                "content": {"proposal_id": proposal_id}
+                            })
+                        self.promises_received = {self.id}
+                        # Set random backoff if proposal fails
+                        self.proposal_backoff = random.randint(5, 15)
+                    
+                    return "idle"
 
-                if plan:
-                    proposal_id = self.get_next_proposal_number()
-                    self.highest_proposal_seen = proposal_id
-                    self.accepted_value = plan
-                    for teammate_id in self.teammate_states.keys():
-                        self.message_outbox.append({"type": "paxos_prepare", "sender_id": self.id, "recipient_id": teammate_id, "content": {"proposal_id": proposal_id}})
-                    self.promises_received = {self.id}
-                
-                return "idle"
-
+            # Random exploration
             if random.random() < 0.2:
                 return random.choice(["turn_left", "turn_right"])
             return "move"
@@ -451,21 +469,28 @@ class Robot:
         }
         self.message_outbox.append(state_message)
 class Simulation:
-    def __init__(self, grid, group1, group2, steps=500):
+    def __init__(self, grid, group1, group2, steps=500, message_delay_range=(1, 5)):
         self.grid = grid
         self.group1 = group1
         self.group2 = group2
         self.steps = steps
         self.scores = {1: 0, 2: 0}
         self.pickup_counts = {1: 0, 2: 0}
+        
+        # Message delay system
+        self.message_delay_range = message_delay_range  # (min_delay, max_delay) in steps
+        self.delayed_messages = []  # List of (delivery_step, message) tuples
+        self.current_step = 0
 
     def run(self):
         step = 0
         while step < self.steps:
+            self.current_step = step
             print(f"\nStep {step+1}")
             print("=" * 40)
             all_robots = self.group1 + self.group2
 
+            self._process_delayed_messages(all_robots)
             self._process_messages(all_robots)
 
             for robot in all_robots:
@@ -477,12 +502,13 @@ class Simulation:
             
             states = []
             for r in all_robots:
-                states.append(f"R{r.id}@{r.position}: {r.state}, partner={r.carrying_with}, gold={r.holding_gold}, target={r.target_gold_pos}, paxos_state={r.paxos_state}")
+                states.append(f"R{r.id}@{r.position}: {r.state}, partner={r.carrying_with}, gold={r.holding_gold}, target={r.target_gold_pos}, paxos={r.paxos_state}, backoff={r.proposal_backoff}")
             print(f"Robot details:")
             for s in states:
                 print(f"  {s}")
             print(f"Scores - Group 1: {self.scores[1]}, Group 2: {self.scores[2]}")
             print(f"Pickups - Group 1: {self.pickup_counts[1]}, Group 2: {self.pickup_counts[2]}")
+            print(f"Pending delayed messages: {len(self.delayed_messages)}")
 
             # Check for end condition
             if self.scores[1] + self.scores[2] >= self.grid.num_gold:
@@ -496,22 +522,21 @@ class Simulation:
         
         self._print_final_results()
 
-    def _process_messages(self, all_robots):
-        """Deliver messages between robots"""
+    def _process_delayed_messages(self, all_robots):
+        """Deliver messages that have reached their delivery time"""
         messages_to_deliver = []
-        for robot in all_robots:
-            messages_to_deliver.extend(robot.message_outbox)
-            robot.message_outbox = []
-
+        remaining_messages = []
+        
+        for delivery_step, msg in self.delayed_messages:
+            if delivery_step <= self.current_step:
+                messages_to_deliver.append(msg)
+            else:
+                remaining_messages.append((delivery_step, msg))
+        
+        self.delayed_messages = remaining_messages
+        
+        # Deliver messages that are ready
         for msg in messages_to_deliver:
-            # Handle gold drop messages
-            if msg["type"] == "drop_gold":
-                pos = tuple(msg["content"]["pos"])
-                if self.grid.grid[pos] == 0:
-                    self.grid.grid[pos] = 1
-                    print(f"DEBUG: Gold dropped at {pos}")
-
-            # Deliver messages to recipients
             for robot in all_robots:
                 if msg.get("broadcast"):
                     sender = next((r for r in all_robots if r.id == msg["sender_id"]), None)
@@ -519,6 +544,33 @@ class Simulation:
                         robot.message_inbox.append(msg)
                 elif "recipient_id" in msg and robot.id == msg["recipient_id"]:
                     robot.message_inbox.append(msg)
+        
+        if messages_to_deliver:
+            print(f"DEBUG: Delivered {len(messages_to_deliver)} delayed messages at step {self.current_step}")
+    
+    def _process_messages(self, all_robots):
+        """Collect outgoing messages and add delays"""
+        messages_to_send = []
+        for robot in all_robots:
+            messages_to_send.extend(robot.message_outbox)
+            robot.message_outbox = []
+
+        for msg in messages_to_send:
+            # Handle gold drop messages immediately (no delay for physical actions)
+            if msg["type"] == "drop_gold":
+                pos = tuple(msg["content"]["pos"])
+                if self.grid.grid[pos] == 0:
+                    self.grid.grid[pos] = 1
+                    print(f"DEBUG: Gold dropped at {pos}")
+            else:
+                # Add random delay to message delivery
+                delay = random.randint(self.message_delay_range[0], self.message_delay_range[1])
+                delivery_step = self.current_step + delay
+                self.delayed_messages.append((delivery_step, msg))
+                
+                # Optional: print debug info for Paxos messages to see delays
+                if msg["type"].startswith("paxos"):
+                    print(f"DEBUG: {msg['type']} from R{msg['sender_id']} scheduled for step {delivery_step} (delay: {delay})")
 
     def _execute_actions(self, all_robots):
         """Execute robot actions and handle game mechanics"""

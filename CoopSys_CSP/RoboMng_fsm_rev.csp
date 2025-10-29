@@ -1,0 +1,207 @@
+-- Copyright (c) 2021  Yoshinao Isobe
+-- National Institute of Advanced Industrial Science and Technology (AIST)
+-- 2021/09/27
+
+RoboMng(ID) = let
+
+-- -----------------------------------
+-- Definition of FSMs
+-- -----------------------------------
+
+--  Prm(Box.v) = if (v==0) then (ID==1) else (v>0)
+
+  -- ---------------------
+  -- State: Approach
+  -- ---------------------
+
+  Approach(rdy) = let
+    Init
+    = obs.APPROACH.ID
+        -> out.dest!Box
+        -> Select(rdy)
+
+    Select(rdy)
+    = in.arrive?x
+        -> (if (x==Box) then Ready(rdy,False)
+            else if (x==Prm) then Ready(rdy,True)
+            else Select(rdy))
+      []
+      in.low
+        -> out.cancel
+        -> Return(True,True) -- chg,bsy
+      []
+      in.cancel
+        -> Return(True,True) -- chg,bsy
+      []
+      in.ready
+        -> Select(True)
+      []
+      in.full
+        -> Select(rdy)
+      []
+      in.new
+        -> Select(rdy)
+      []
+      in.comp
+        -> Select(rdy)
+      []
+      tock
+        -> Select(rdy)
+      
+   within Init
+
+  -- ---------------------
+  -- State: Ready
+  -- ---------------------
+
+  Ready(rdy,prm) = let
+    Init
+    = obs.READY.ID
+        -> out.ready
+        -> (if (rdy) then Transport(prm)
+            else Select)
+           
+    Select
+    = in.arrive?x
+        -> Select
+      []
+      in.low
+        -> out.cancel
+        -> Return(True,True) -- chg,bsy
+      []
+      in.cancel
+        -> out.cancel  -- corrected
+        -> Return(True,True) -- chg,bsy
+      []
+      in.ready
+        -> Transport(prm)
+      []
+      in.full
+        -> Select
+      []
+      in.new
+        -> Select
+      []
+      in.comp
+        -> Select
+      []
+      tock
+        -> Select
+        
+   within Init
+
+  -- ---------------------
+  -- State: Transport
+  -- ---------------------
+
+  Transport(prm) = let
+    Init
+    = obs.TRANSPORT.ID
+        -> out.dest!Goal
+        -> Select
+        
+    Select
+    = in.arrive?x
+        -> (if (prm)   -- main
+            then out.comp -> Return(False,False) -- chg,bsy
+            else Select)
+      []
+      in.comp          -- sub
+        -> Return(False,False) -- chg,bsy
+      []
+      in.low
+        -> out.cancel
+        -> Return(True,True) -- chg,bsy
+      []
+      in.cancel
+        -> out.cancel -- corrected
+        -> Return(True,True) -- chg,bsy
+      []
+      in.ready
+        -> Select
+      []
+      in.full
+        -> Select
+      []
+      in.new
+        -> Select
+      []
+      tock
+        -> Select
+        
+   within Init
+
+  -- ---------------------
+  -- State: Return
+  -- ---------------------
+
+  Return(chg,bsy) = let
+  
+    Init
+    = obs.RETURN.ID
+       -> out.dest!Home
+       -> Return_Charge(chg,bsy,False) -- chg,bsy,rdy
+
+  within Init
+
+  -- ---------------------
+  -- State: Charge
+  -- ---------------------
+
+  Charge(bsy,rdy) = let
+  
+    Init
+    = obs.CHARGE.ID
+      -> Return_Charge(True,bsy,rdy) -- chg,bsy,rdy
+
+  within Init
+
+  -- ---------------------
+  -- State: Return_Charge
+  -- ---------------------
+
+  Return_Charge(chg,bsy,rdy) = let
+    Init
+    = Select(chg,bsy,rdy)
+
+    Select(chg,bsy,rdy)
+    = in.arrive?x
+        -> (if (x==Home)
+            then Charge(bsy,rdy)
+            else Select(chg,bsy,rdy))
+      []
+      in.low
+        -> out.cancel
+        -> Select(True,bsy,False)
+      []
+      in.cancel
+        -> Select(True,bsy,False)
+      []
+      in.ready
+        -> Select(chg,bsy,True)
+      []
+      in.full
+        -> (if (bsy) then Approach(rdy)
+            else Select(False,bsy,rdy))
+      []
+      in.new
+        -> (if (chg) then Select(chg,True,rdy)
+            else Approach(rdy))
+      []
+      in.comp
+        -> Select(chg,False,rdy)
+      []
+      tock -> Select(chg,bsy,rdy)
+
+   within Init
+
+  -- ---------------------
+  -- State: Start
+  -- ---------------------
+
+  Start =  in.start
+      -> out.start
+      -> Charge(False,False)
+
+within Start
+

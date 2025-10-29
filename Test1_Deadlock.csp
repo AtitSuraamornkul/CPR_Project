@@ -1,0 +1,204 @@
+-- ============================================================================
+-- TEST 1: DEADLOCK FREEDOM CHECK
+-- Verifies that the system doesn't get completely stuck
+-- Expected: WILL FAIL - deadlock due to late message handling
+-- ============================================================================
+
+-- ----------------------------------------------------------------------------
+-- CONFIGURATION
+-- ----------------------------------------------------------------------------
+
+RobotIDs = {1, 2}
+N_ROBOTS = 2
+
+MinDelay = 1
+MaxDelay = 2
+RESPONSE_TIMEOUT = 3
+HERE_TIMEOUT = 4
+MOVE_TIMEOUT = 3
+MAX_RETRIES = 1
+
+datatype Position = ExploringPos | Adjacent | AtGold | Opposite | Moving
+
+-- ----------------------------------------------------------------------------
+-- CHANNELS
+-- ----------------------------------------------------------------------------
+
+channel tock
+channel send, recv : RobotIDs.Message
+
+datatype Message
+  = Found.RobotIDs.{0..2}.Position.Position
+  | Response.RobotIDs.RobotIDs.{0..2}
+  | Ack.RobotIDs.RobotIDs.{0..2}
+  | Here.RobotIDs.RobotIDs.{0..2}
+  | Ack2.RobotIDs.RobotIDs.{0..2}
+  | IDAnnounce.RobotIDs
+
+channel obs : ObsEvent
+datatype ObsEvent
+  = BecameFinder.RobotIDs
+  | BecameHelper.RobotIDs.RobotIDs
+  | MovingToGold.RobotIDs
+  | PickupSuccess.RobotIDs.RobotIDs
+  | Timeout.RobotIDs
+  | ConflictResolved.RobotIDs
+
+-- ----------------------------------------------------------------------------
+-- ROBOT AS FINDER
+-- ----------------------------------------------------------------------------
+
+Finder(id, index, timer) = 
+  obs.BecameFinder.id ->
+  send.id.Found.id.index.Adjacent.AtGold ->
+  WaitResponse(id, index, 0, {})
+
+WaitResponse(id, index, timer, responders) =
+  recv.id.Response?helper_id!id!index ->
+    let new_responders = union(responders, {helper_id})
+    within
+      (if (card(new_responders) > 0)
+       then 
+         let helper = head(seq(new_responders))
+         within
+           send.id.Ack.id.helper.index ->
+           WaitHere(id, helper, index, 0)
+       else
+         WaitResponse(id, index, 0, new_responders))
+  
+  [] (timer > RESPONSE_TIMEOUT) & tock ->
+     obs.Timeout.id ->
+     send.id.Found.id.index.Adjacent.AtGold ->
+     WaitResponse(id, index, 0, responders)
+  
+  [] tock -> WaitResponse(id, index, timer+1, responders)
+
+WaitHere(id, helper, index, timer) =
+  recv.id.Here.helper.id.index ->
+    obs.MovingToGold.id ->
+    send.id.Ack2.id.helper.index ->
+    WaitPartnerMove(id, helper, index, 0)
+  
+  [] (timer > HERE_TIMEOUT) & tock ->
+     obs.Timeout.id ->
+     (if (index < MAX_RETRIES)
+      then Finder(id, index+1, 0)
+      else STOP)
+  
+  [] tock -> WaitHere(id, helper, index, timer+1)
+  
+  -- BUG: Cannot handle late responses!
+
+WaitPartnerMove(id, helper, index, timer) =
+  obs.MovingToGold.helper ->
+    obs.PickupSuccess.id.helper ->
+    STOP
+  
+  [] (timer > MOVE_TIMEOUT) & tock ->
+     obs.Timeout.id ->
+     (if (index < MAX_RETRIES)
+      then Finder(id, index+1, 0)
+      else STOP)
+  
+  [] tock -> WaitPartnerMove(id, helper, index, timer+1)
+
+-- ----------------------------------------------------------------------------
+-- ROBOT AS HELPER
+-- ----------------------------------------------------------------------------
+
+Helper(id) = RobotExploring(id)
+
+RobotExploring(id) =
+  recv.id.Found?finder_id?index?robot_pos?gold_pos ->
+    (if (id != finder_id)
+     then
+       send.id.Response.id.finder_id.index ->
+       WaitAck(id, finder_id, index, 0)
+     else
+       RobotExploring(id))
+  
+  [] tock -> RobotExploring(id)
+
+WaitAck(id, finder_id, index, timer) =
+  recv.id.Ack.finder_id.id.index ->
+    obs.BecameHelper.id.finder_id ->
+    MoveToOpposite(id, finder_id, index)
+  
+  [] recv.id.Ack.finder_id?other_id!index ->
+     (if (other_id != id)
+      then RobotExploring(id)
+      else WaitAck(id, finder_id, index, timer))
+  
+  [] (timer > RESPONSE_TIMEOUT) & tock ->
+     RobotExploring(id)
+  
+  [] tock -> WaitAck(id, finder_id, index, timer+1)
+
+MoveToOpposite(id, finder_id, index) =
+  tock ->
+  send.id.Here.id.finder_id.index ->
+  WaitAck2(id, finder_id, index, 0)
+
+WaitAck2(id, finder_id, index, timer) =
+  recv.id.Ack2.finder_id.id.index ->
+  obs.MovingToGold.finder_id ->
+    obs.MovingToGold.id ->
+    obs.PickupSuccess.finder_id.id ->
+    STOP
+  
+  [] (timer > MOVE_TIMEOUT) & tock ->
+     RobotExploring(id)
+  
+  [] tock -> WaitAck2(id, finder_id, index, timer+1)
+
+-- ----------------------------------------------------------------------------
+-- SYSTEM
+-- ----------------------------------------------------------------------------
+
+Robot(id) = 
+  Finder(id, 1, 0)
+  []
+  RobotExploring(id)
+
+DelayBuffer(id) = Buffer(id, <>)
+
+Buffer(id, queue) =
+  send.id?msg -> Buffer(id, queue ^ <(msg, 2)>)
+  
+  [] (#queue > 0) & tock ->
+     let (msg, delay) = head(queue)
+         rest = tail(queue)
+     within
+       (if (delay <= 1)
+        then recv.id.msg -> Buffer(id, rest)
+        else Buffer(id, <(msg, delay-1)> ^ rest))
+  
+  [] (#queue == 0) & tock -> Buffer(id, queue)
+
+RobotWithComm(id) =
+  Robot(id) 
+  [|{|send.id, recv.id, tock|}|] 
+  DelayBuffer(id)
+
+System = 
+  RobotWithComm(1)
+  [|{|tock, obs|}|]
+  RobotWithComm(2)
+
+-- ----------------------------------------------------------------------------
+-- ASSERTION
+-- ----------------------------------------------------------------------------
+
+assert System :[deadlock free [F]]
+
+-- ============================================================================
+-- EXPECTED RESULT: FAIL
+-- 
+-- Counterexample should show:
+-- 1. Finder picks a helper
+-- 2. Late Response message arrives
+-- 3. Finder in WaitHere cannot accept it
+-- 4. DEADLOCK
+--
+-- This is Bug #1: Missing late message handling
+-- ============================================================================

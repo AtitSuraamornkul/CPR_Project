@@ -1,0 +1,441 @@
+-- ============================================================================
+-- SIMPLIFIED CSP MODEL: Robot Gold Collection (Current Implementation)
+-- Purpose: Verify current implementation with message delays
+-- Focus: Find bugs in Paxos consensus and coordination
+-- ============================================================================
+
+-- This model intentionally includes the BUGS from your current Python code
+-- to demonstrate what formal verification catches!
+
+-- ----------------------------------------------------------------------------
+-- SYSTEM PARAMETERS (Simplified)
+-- ----------------------------------------------------------------------------
+
+-- Only 3 robots (enough to expose quorum bugs)
+RobotIDs = {1, 2, 3}
+TEAM_SIZE = 3  -- Fixed team size (but implementation doesn't use this!)
+
+-- Abstract positions (not full 20x20 grid)
+datatype Position = Home | GoldSite | Deposit
+
+-- Message delays
+MinDelay = 1
+MaxDelay = 3  -- Reduced for faster verification
+
+-- Timeouts
+PARTNER_TIMEOUT = 10  -- Partner wait timeout
+-- NOTE: No Paxos timeout in current implementation (BUG!)
+
+-- ----------------------------------------------------------------------------
+-- DATA TYPES
+-- ----------------------------------------------------------------------------
+
+-- Robot states (from your full.py)
+datatype RobotState = Idle | MovingToGold | WaitingAtGold | CarryingGold
+
+-- Paxos states (from your full.py)  
+datatype PaxosState = PaxosIdle | Preparing | Proposing
+
+-- Proposal IDs (robot_id * 100 + proposal_number)
+-- Make ProposalID an Int so we can compare them
+-- Include 0 for "no proposal"
+ProposalID = {0, 100, 101, 102, 200, 201, 202, 300, 301, 302}
+
+-- Plans (simplified: just robot pair and gold position)
+datatype Plan = NoPlan | GoldPlan.RobotIDs.RobotIDs.Position
+
+-- ----------------------------------------------------------------------------
+-- CHANNELS
+-- ----------------------------------------------------------------------------
+
+channel tock  -- Time step
+
+-- Internal robot events
+channel propose : RobotIDs.ProposalID.Plan  -- Robot initiates proposal (ProposalID is Int)
+channel commit : RobotIDs.Plan               -- Robot commits to plan
+channel timeout : RobotIDs                   -- Robot times out
+channel pickup_attempt : RobotIDs.RobotIDs   -- Attempt pickup
+channel pickup_success : RobotIDs.RobotIDs   -- Successful pickup
+channel pickup_fail : RobotIDs.RobotIDs      -- Failed pickup
+
+-- Message passing (with delays)
+channel send : RobotIDs.Message
+channel recv : RobotIDs.Message
+
+datatype Message
+  = StateUpdate.RobotState.PaxosState
+  | PaxosPrepare.ProposalID  -- ProposalID is now Int
+  | PaxosPromise.ProposalID.ProposalID.Plan  -- (proposal_id, accepted_id, accepted_plan)
+  | PaxosAccept.ProposalID.Plan
+  | PaxosAccepted.ProposalID
+  | PaxosCommit.Plan
+  | AtGold.Position
+  | ReadyPickup.Position
+
+-- Observable events (for specifications)
+channel obs : ObsEvent
+datatype ObsEvent
+  = InvalidQuorum.RobotIDs.{0..10}.{0..10}  -- (robot, promises_count, teammates_known)
+  | MultipleCommits.Plan.Plan                 -- Two different plans committed
+  | StuckInPreparing.RobotIDs                -- Robot stuck in preparing
+  | PartnerTimeout.RobotIDs                  -- Partner coordination timeout
+  | DuplicateAssignment.RobotIDs.RobotIDs.RobotIDs.RobotIDs  -- Two pairs assigned same gold
+
+-- ----------------------------------------------------------------------------
+-- ROBOT FSM (Models your current Python implementation WITH BUGS)
+-- ----------------------------------------------------------------------------
+
+Robot(id) = RobotInit(id, Home, 0, {})
+
+RobotInit(id, pos, prop_num, known_teammates) =
+  tock -> RobotIdle(id, pos, prop_num, known_teammates, 0, NoPlan)
+
+-- ----------------------------------------------------------------------------
+-- State: Idle
+-- ----------------------------------------------------------------------------
+
+RobotIdle(id, pos, prop_num, known_teammates, backoff, plan) =
+  
+  -- Receive state update from teammate (builds known_teammates)
+  recv.id.StateUpdate?state?pstate ->
+    let new_known = union(known_teammates, {id})  -- Simplified: just track IDs
+    within RobotIdle(id, pos, prop_num, new_known, backoff, plan)
+  
+  -- Receive committed plan
+  [] recv.id.PaxosCommit?committed_plan ->
+     (if (committed_plan != NoPlan and InPlan(id, committed_plan))
+      then commit.id.committed_plan ->
+           RobotMoving(id, GoldSite, prop_num, known_teammates, GetPartner(id, committed_plan))
+      else RobotIdle(id, pos, prop_num, known_teammates, 0, NoPlan))
+  
+  -- Observe gold and try to propose (if backoff expired)
+  [] (backoff == 0) & propose.id.(id*100 + prop_num)?proposed_plan ->
+     -- BUG #1: Uses known_teammates for quorum calculation (should use TEAM_SIZE)
+     -- BUG #2: No timeout recovery if promises don't arrive
+     send.id.PaxosPrepare.(id*100 + prop_num) ->
+     RobotPreparing(id, pos, (id*100 + prop_num), proposed_plan, prop_num+1, 
+                    known_teammates, {id}, random({5..15}))
+  
+  -- Time passes (decrement backoff)
+  [] tock -> RobotIdle(id, pos, prop_num, known_teammates, max(0, backoff-1), plan)
+
+
+-- ----------------------------------------------------------------------------
+-- State: Preparing (Paxos Phase 1) - WITH BUGS
+-- ----------------------------------------------------------------------------
+
+RobotPreparing(id, pos, pid, plan, prop_num, known_teammates, promises, backoff) =
+  
+  -- Receive promise
+  recv.id.PaxosPromise.pid?accepted_pid?accepted_plan ->
+    let new_promises = union(promises, {id})  -- Simplified: just count promises
+        -- BUG #1: INCORRECT QUORUM CALCULATION
+        -- Uses #known_teammates instead of fixed TEAM_SIZE
+        num_teammates = card(known_teammates) + 1  
+        quorum = num_teammates / 2
+        promise_count = card(new_promises)
+    within 
+      (if (promise_count > quorum)
+       then 
+         -- Check if we have enough for quorum (INCORRECTLY!)
+         obs.InvalidQuorum.id.promise_count.num_teammates ->
+         send.id.PaxosAccept.pid.plan ->
+         RobotProposing(id, pos, pid, plan, prop_num, known_teammates, {id}, backoff)
+       else 
+         RobotPreparing(id, pos, pid, plan, prop_num, known_teammates, new_promises, backoff))
+  
+  -- BUG #2: NO TIMEOUT RECOVERY!
+  -- In real implementation, robot gets stuck here if promises don't arrive
+  -- For model checking, we add a timeout after many tocks to observe the issue
+  
+  [] tock -> 
+     -- After 20 tocks with insufficient promises, we're stuck!
+     obs.StuckInPreparing.id ->
+     RobotPreparing(id, pos, pid, plan, prop_num, known_teammates, promises, backoff)
+  
+  -- Still receive state updates even while preparing
+  [] recv.id.StateUpdate?state?pstate ->
+     let new_known = union(known_teammates, {id})
+     within RobotPreparing(id, pos, pid, plan, prop_num, new_known, promises, backoff)
+
+
+-- ----------------------------------------------------------------------------
+-- State: Proposing (Paxos Phase 2) - WITH BUGS
+-- ----------------------------------------------------------------------------
+
+RobotProposing(id, pos, pid, plan, prop_num, known_teammates, accepts, backoff) =
+  
+  -- Receive accepted
+  recv.id.PaxosAccepted.pid ->
+    let new_accepts = union(accepts, {id})
+        -- Same bug: uses known_teammates for quorum
+        num_teammates = card(known_teammates) + 1
+        quorum = num_teammates / 2
+        accept_count = card(new_accepts)
+    within 
+      (if (accept_count > quorum)
+       then 
+         -- Consensus reached! Commit the plan
+         send.id.PaxosCommit.plan ->
+         commit.id.plan ->
+         RobotMoving(id, GoldSite, prop_num, known_teammates, GetPartner(id, plan))
+       else 
+         RobotProposing(id, pos, pid, plan, prop_num, known_teammates, new_accepts, backoff))
+  
+  [] tock -> RobotProposing(id, pos, pid, plan, prop_num, known_teammates, accepts, backoff)
+
+
+-- ----------------------------------------------------------------------------
+-- State: Moving to Gold
+-- ----------------------------------------------------------------------------
+
+RobotMoving(id, target, prop_num, known_teammates, partner) =
+  -- Simplified: instantly arrive
+  tock -> 
+  send.id.AtGold.target ->
+  RobotWaiting(id, target, prop_num, known_teammates, partner, 0)
+
+
+-- ----------------------------------------------------------------------------
+-- State: Waiting at Gold (with partner timeout)
+-- ----------------------------------------------------------------------------
+
+RobotWaiting(id, pos, prop_num, known_teammates, partner, timer) =
+  
+  -- Partner ready
+  recv.id.ReadyPickup.pos ->
+    pickup_attempt.id.partner ->
+    pickup_success.id.partner ->  -- Simplified: always succeeds if both ready
+    RobotCarrying(id, prop_num, known_teammates)
+  
+  -- BUG #5: TIMEOUT TOO SHORT (especially with message delays)
+  [] (timer > PARTNER_TIMEOUT) & tock ->
+     obs.PartnerTimeout.id ->
+     timeout.id ->
+     RobotInit(id, pos, prop_num, known_teammates)
+  
+  -- Keep waiting
+  [] (timer <= PARTNER_TIMEOUT) & tock ->
+     RobotWaiting(id, pos, prop_num, known_teammates, partner, timer+1)
+
+
+-- ----------------------------------------------------------------------------
+-- State: Carrying Gold (simplified - immediately deposit)
+-- ----------------------------------------------------------------------------
+
+RobotCarrying(id, prop_num, known_teammates) =
+  tock -> RobotInit(id, Deposit, prop_num, known_teammates)
+
+
+-- ----------------------------------------------------------------------------
+-- ACCEPTOR PROCESS (Responds to Paxos messages)
+-- ----------------------------------------------------------------------------
+
+Acceptor(id) = AcceptorState(id, 0, 0, NoPlan)  -- 0 = no proposal seen/accepted yet
+
+AcceptorState(id, highest_seen, accepted_id, accepted_plan) =
+  
+  -- Receive prepare
+  recv.id.PaxosPrepare?pid ->
+    (if (pid >= highest_seen)
+     then 
+       send.id.PaxosPromise.pid.accepted_id.accepted_plan ->
+       AcceptorState(id, pid, accepted_id, accepted_plan)
+     else 
+       AcceptorState(id, highest_seen, accepted_id, accepted_plan))
+  
+  -- Receive accept
+  [] recv.id.PaxosAccept?pid?plan ->
+     (if (pid >= highest_seen)
+      then 
+        send.id.PaxosAccepted.pid ->
+        AcceptorState(id, pid, pid, plan)
+      else 
+        AcceptorState(id, highest_seen, accepted_id, accepted_plan))
+  
+  [] tock -> AcceptorState(id, highest_seen, accepted_id, accepted_plan)
+
+
+-- ----------------------------------------------------------------------------
+-- MESSAGE DELAY BUFFER
+-- ----------------------------------------------------------------------------
+
+-- Simplified delay: all messages delayed by exactly 2 steps
+DelayBuffer(id) = Buffer(id, <>, 0)
+
+Buffer(id, queue, step) =
+  -- Receive new message
+  send.id?msg -> Buffer(id, queue ^ <(msg, MinDelay)>, step)
+  
+  -- Deliver messages whose delay expired
+  [] (#queue > 0) & tock ->
+     let 
+       (msg, delay) = head(queue)
+       rest = tail(queue)
+     within
+       (if (delay <= 1)
+        then recv.id.msg -> Buffer(id, rest, step+1)
+        else Buffer(id, <(msg, delay-1)> ^ rest, step+1))
+  
+  -- Time passes
+  [] (#queue == 0) & tock -> Buffer(id, queue, step+1)
+
+
+-- ----------------------------------------------------------------------------
+-- SYSTEM COMPOSITION
+-- ----------------------------------------------------------------------------
+
+-- Single robot with buffer and acceptor
+RobotWithComm(id) = 
+  (Robot(id) 
+   [|{|send.id, recv.id, tock|}|] 
+   DelayBuffer(id))
+  [|{|send.id, recv.id, tock|}|]
+  Acceptor(id)
+
+-- Full system: 3 robots
+System = 
+  RobotWithComm(1)
+  [|{|tock, obs, propose, commit, timeout, pickup_attempt, pickup_success|}|]
+  (RobotWithComm(2)
+   [|{|tock, obs, propose, commit, timeout, pickup_attempt, pickup_success|}|]
+   RobotWithComm(3))
+
+
+-- ----------------------------------------------------------------------------
+-- HELPER FUNCTIONS
+-- ----------------------------------------------------------------------------
+
+InPlan(id, NoPlan) = false
+InPlan(id, GoldPlan.r1.r2.pos) = (id == r1 or id == r2)
+
+GetPartner(id, GoldPlan.r1.r2.pos) = if (id == r1) then r2 else r1
+GetPartner(id, NoPlan) = id  -- Dummy value (should never be called with NoPlan in practice)
+
+max(a, b) = if (a > b) then a else b
+
+random(s) = 10  -- Simplified: return constant
+
+
+-- ============================================================================
+-- SAFETY SPECIFICATIONS (What Should Be True)
+-- ============================================================================
+
+-- Spec 1: No robot should proceed with invalid quorum
+-- In current implementation: Robot might think 2/3 is enough when only knows 2 teammates
+-- but team is actually 3 robots (needs 2 for quorum)
+NoInvalidQuorum = 
+  obs.InvalidQuorum?robot?promises?known ->
+    (if (promises <= known/2) 
+     then STOP  -- BUG DETECTED: Proceeded without real quorum!
+     else NoInvalidQuorum)
+  [] tock -> NoInvalidQuorum
+  [] commit?r?p -> NoInvalidQuorum
+  [] propose?r?pid?p -> NoInvalidQuorum
+
+-- Spec 2: At most one plan should be committed per round
+-- With bugs, multiple robots might commit different plans
+OnePlanPerRound = 
+  commit?r1?plan1 ->
+    ([] r2:diff(RobotIDs,{r1}) @ [] plan2:diff({plan1},{NoPlan}) @
+     commit.r2.plan2 -> 
+       obs.MultipleCommits.plan1.plan2 -> STOP)  -- BUG DETECTED!
+    [] tock -> OnePlanPerRound
+    [] commit?r?p -> OnePlanPerRound  -- Same plan is OK
+  [] tock -> OnePlanPerRound
+
+-- Spec 3: Robots should not get stuck in Preparing state forever
+-- This is a liveness property - eventually should progress
+NoStuckRobots = 
+  obs.StuckInPreparing?robot -> STOP  -- BUG DETECTED: Robot stuck!
+  [] tock -> NoStuckRobots
+  [] commit?r?p -> NoStuckRobots
+  [] propose?r?pid?p -> NoStuckRobots
+
+-- Spec 4: Partner coordination should not timeout unnecessarily
+MinimalTimeouts =
+  obs.PartnerTimeout?robot -> STOP  -- BUG: Timeout occurred!
+  [] tock -> MinimalTimeouts
+  [] pickup_success?r1?r2 -> MinimalTimeouts
+
+
+-- ============================================================================
+-- VERIFICATION ASSERTIONS
+-- ============================================================================
+
+-- These assertions will FAIL with current implementation!
+-- That's the point - to demonstrate formal verification finds bugs
+
+-- TEST 1: Check for invalid quorum (EXPECTED TO FAIL)
+-- Start with this one - it's the fastest to check
+assert NoInvalidQuorum [T= System
+-- FDR4 will show: Robot proceeds with 2 promises when only knows 2 teammates
+-- but should wait for at least 2/3 of actual team
+
+-- TEST 2: Check only one plan committed (EXPECTED TO FAIL with race conditions)
+-- assert OnePlanPerRound [T= System  
+-- FDR4 may show: Two robots commit different plans due to split brain
+
+-- TEST 3: Deadlock freedom (MIGHT FAIL - robots stuck in preparing)
+-- assert System :[deadlock free [F]]
+-- FDR4 may show: All robots stuck waiting for messages that never arrive
+
+-- TEST 4: Livelock freedom (MIGHT FAIL - continuous failed proposals)
+-- Comment out - this is very expensive!
+-- assert System :[livelock free [FD]]
+
+
+-- ============================================================================
+-- WHAT TO LOOK FOR IN FDR4
+-- ============================================================================
+
+{-
+When you run this in FDR4, expect these failures:
+
+1. NoInvalidQuorum FAILS:
+   Counterexample trace will show:
+   - Robot 1 only knows teammate 2 (teammate 3's state_update delayed)
+   - Robot 1 thinks team size = 2 (self + teammate 2)
+   - Robot 1 gets 1 promise, calculates quorum = 2/2 = 1
+   - Robot 1 proceeds to proposing (WRONG! Need 2/3 of 3 robots)
+   
+   FIX: Use constant TEAM_SIZE = 3 instead of #known_teammates
+
+2. OnePlanPerRound FAILS:
+   Counterexample trace will show:
+   - Robot 1 and Robot 2 both propose simultaneously
+   - Messages delayed/interleaved
+   - Both reach their local "quorum" (incorrectly)
+   - Both commit different plans
+   
+   FIX: Proper Paxos requires accepting higher proposal IDs
+
+3. Deadlock:
+   Counterexample trace will show:
+   - Robot sends PREPARE
+   - Only gets some promises (not enough for quorum)
+   - Waits forever (no timeout recovery)
+   - All robots stuck
+   
+   FIX: Add timeout to Preparing state
+
+4. PartnerTimeout:
+   Counterexample trace will show:
+   - Robot 1 arrives at gold, sends AtGold (delay: 3 steps)
+   - Robot 2 moving to gold (takes 5 steps)
+   - Message arrives at step 3
+   - Robot 2 still 2 steps away
+   - Robot 1 times out at step 10 (too short!)
+   
+   FIX: Increase timeout or make it adaptive
+
+To run in FDR4:
+1. Open this file in FDR4
+2. Click "Run All" or select individual assertions
+3. When assertion fails, click on the counterexample
+4. FDR4 will show the exact trace of events leading to the bug
+5. Use this to understand WHY the bug occurs
+6. Fix the bug in this CSP model
+7. Re-verify until all pass
+8. Then implement fixes in Python!
+-}

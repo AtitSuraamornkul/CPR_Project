@@ -1,0 +1,336 @@
+-- ============================================================================
+-- CSP MODEL: Current Implementation with Message Delays
+-- Models: full.py with USE_DELAYS = True
+-- Purpose: Demonstrate protocol issues caused by message delays
+-- ============================================================================
+
+-- ----------------------------------------------------------------------------
+-- CONFIGURATION
+-- ----------------------------------------------------------------------------
+
+-- Simplified: 3 robots, 1 gold piece
+RobotIDs = {1, 2, 3}
+TEAM_SIZE = 3
+
+-- Message delays (1-3 steps for faster verification)
+MinDelay = 1
+MaxDelay = 3
+
+-- Timeouts from your implementation
+PARTNER_TIMEOUT = 20    -- From full.py line 302
+PAXOS_TIMEOUT = 30      -- Add this (currently missing in full.py!)
+
+-- Abstract positions
+datatype Position = Home | GoldPos | DepositPos
+
+-- ----------------------------------------------------------------------------
+-- DATA TYPES
+-- ----------------------------------------------------------------------------
+
+datatype RobotState = Idle | MovingToGold | WaitingAtGold | CarryingGold | MovingToDeposit
+
+datatype PaxosState = PaxosIdle | Preparing | Proposing | Committed
+
+datatype Plan = NoPlan | GoldPlan.RobotIDs.RobotIDs  -- (robot1, robot2) pair for gold
+
+-- ----------------------------------------------------------------------------
+-- CHANNELS
+-- ----------------------------------------------------------------------------
+
+channel tock  -- Time step
+
+-- Messages (sent to delay buffer)
+channel send, recv : RobotIDs.Message
+
+datatype Message
+  = StateUpdate.RobotState.PaxosState.Position
+  | PaxosPrepare.{0..400}  -- proposal_id
+  | PaxosPromise.{0..400}  -- proposal_id
+  | PaxosAccept.{0..400}.Plan
+  | PaxosCommit.Plan
+  | AtGold.Position
+  | ReadyPickup.Position
+
+-- Observable events for verification
+channel obs : ObsEvent
+datatype ObsEvent
+  = PartnerTimeout.RobotIDs
+  | PaxosStuck.RobotIDs
+  | GoldPickedUp.RobotIDs.RobotIDs
+  | GoldDropped.RobotIDs.RobotIDs
+  | InvalidState.RobotIDs
+
+-- ----------------------------------------------------------------------------
+-- ROBOT PROCESS (Simplified from full.py)
+-- ----------------------------------------------------------------------------
+
+Robot(id) = RobotInit(id, 0, NoPlan)
+
+RobotInit(id, prop_num, plan) = 
+  tock -> RobotIdle(id, Home, prop_num, plan, 0, 0)
+
+-- ----------------------------------------------------------------------------
+-- IDLE STATE
+-- ----------------------------------------------------------------------------
+
+RobotIdle(id, pos, prop_num, plan, paxos_timer, partner_timer) =
+  -- Broadcast state (like full.py line 444)
+  send.id.StateUpdate.Idle.PaxosIdle.pos ->
+  
+  -- Receive committed plan
+  recv.id.PaxosCommit?new_plan ->
+    (if (new_plan != NoPlan and InPlan(id, new_plan))
+     then RobotMovingToGold(id, GoldPos, prop_num, new_plan, 0, 0)
+     else RobotIdle(id, pos, prop_num, plan, 0, 0))
+  
+  -- Observe gold and propose (simplified - just propose directly)
+  [] (prop_num < 2) & tock ->  -- Limit proposals to prevent state explosion
+     RobotPreparing(id, pos, id*100 + prop_num, 
+                    GoldPlan.id.(id % 3 + 1),  -- Pair with next robot
+                    prop_num + 1, {id}, 0, 0)
+  
+  [] tock -> RobotIdle(id, pos, prop_num, plan, 0, 0)
+
+-- ----------------------------------------------------------------------------
+-- PAXOS: PREPARING STATE
+-- ----------------------------------------------------------------------------
+
+RobotPreparing(id, pos, pid, plan, prop_num, promises, paxos_timer, partner_timer) =
+  -- Send PREPARE (like full.py line 391)
+  send.id.PaxosPrepare.pid ->
+  
+  -- Receive PROMISE
+  recv.id.PaxosPromise.pid ->
+    let new_promises = union(promises, {id})  -- Simplified tracking
+    within
+      (if (card(new_promises) > TEAM_SIZE / 2)  -- Check quorum
+       then 
+         -- Send ACCEPT
+         send.id.PaxosAccept.pid.plan ->
+         RobotProposing(id, pos, pid, plan, prop_num, {id}, 0, 0)
+       else
+         RobotPreparing(id, pos, pid, plan, prop_num, new_promises, 0, 0))
+  
+  -- BUG: No timeout in current implementation!
+  -- Robot can get stuck here forever waiting for promises
+  -- (Timeout recovery commented out - this is the bug!)
+  -- [] (paxos_timer > PAXOS_TIMEOUT) & tock ->
+  --    obs.PaxosStuck.id ->
+  --    RobotIdle(id, pos, prop_num, NoPlan, 0, 0)
+  
+  [] tock -> RobotPreparing(id, pos, pid, plan, prop_num, promises, paxos_timer+1, 0)
+
+-- ----------------------------------------------------------------------------
+-- PAXOS: PROPOSING STATE  
+-- ----------------------------------------------------------------------------
+
+RobotProposing(id, pos, pid, plan, prop_num, accepts, paxos_timer, partner_timer) =
+  -- Receive ACCEPTED
+  recv.id.PaxosAccept.pid?p ->
+    let new_accepts = union(accepts, {id})
+    within
+      (if (card(new_accepts) > TEAM_SIZE / 2)
+       then
+         -- Commit!
+         send.id.PaxosCommit.plan ->
+         RobotMovingToGold(id, GoldPos, prop_num, plan, 0, 0)
+       else
+         RobotProposing(id, pos, pid, plan, prop_num, new_accepts, 0, 0))
+  
+  [] tock -> RobotProposing(id, pos, pid, plan, prop_num, accepts, paxos_timer+1, 0)
+
+-- ----------------------------------------------------------------------------
+-- MOVING TO GOLD
+-- ----------------------------------------------------------------------------
+
+RobotMovingToGold(id, target, prop_num, plan, paxos_timer, partner_timer) =
+  -- Broadcast state
+  send.id.StateUpdate.MovingToGold.Committed.target ->
+  
+  -- Arrive at gold (simplified - instant)
+  tock ->
+  send.id.AtGold.target ->
+  RobotWaitingAtGold(id, target, prop_num, plan, 0, 0)
+
+-- ----------------------------------------------------------------------------
+-- WAITING AT GOLD (Partner Coordination)
+-- ----------------------------------------------------------------------------
+
+RobotWaitingAtGold(id, pos, prop_num, plan, paxos_timer, timer) =
+  -- Broadcast state
+  send.id.StateUpdate.WaitingAtGold.Committed.pos ->
+  
+  -- Receive partner's AtGold message
+  recv.id.AtGold.pos ->
+    -- Partner arrived! Pick up gold
+    obs.GoldPickedUp.id.(GetPartner(id, plan)) ->
+    RobotCarryingGold(id, prop_num, plan, 0, 0)
+  
+  -- BUG: Timeout too short! (line 302 in full.py)
+  -- With message delays, partner might not arrive in time
+  [] (timer > PARTNER_TIMEOUT) & tock ->
+     obs.PartnerTimeout.id ->
+     RobotIdle(id, pos, prop_num, NoPlan, 0, 0)
+  
+  [] tock -> RobotWaitingAtGold(id, pos, prop_num, plan, 0, timer+1)
+
+-- ----------------------------------------------------------------------------
+-- CARRYING GOLD
+-- ----------------------------------------------------------------------------
+
+RobotCarryingGold(id, prop_num, plan, paxos_timer, partner_timer) =
+  -- Simplified - just deposit immediately
+  tock ->
+  obs.GoldPickedUp.id.(GetPartner(id, plan)) ->  -- Success!
+  RobotIdle(id, DepositPos, prop_num, NoPlan, 0, 0)
+
+-- ----------------------------------------------------------------------------
+-- ACCEPTOR (Responds to Paxos messages)
+-- ----------------------------------------------------------------------------
+
+Acceptor(id) = AcceptorState(id, 0)
+
+AcceptorState(id, highest_seen) =
+  -- Receive PREPARE → send PROMISE
+  recv.id.PaxosPrepare?pid ->
+    (if (pid >= highest_seen)
+     then send.id.PaxosPromise.pid -> AcceptorState(id, pid)
+     else AcceptorState(id, highest_seen))
+  
+  -- Receive ACCEPT → send ACCEPTED
+  [] recv.id.PaxosAccept?pid?plan ->
+     (if (pid >= highest_seen)
+      then send.id.PaxosAccept.pid.plan -> AcceptorState(id, pid)
+      else AcceptorState(id, highest_seen))
+  
+  [] tock -> AcceptorState(id, highest_seen)
+
+-- ----------------------------------------------------------------------------
+-- MESSAGE DELAY BUFFER (models 1-3 step delays)
+-- ----------------------------------------------------------------------------
+
+DelayBuffer(id) = Buffer(id, <>)
+
+Buffer(id, queue) =
+  -- Receive message, add to queue with random delay
+  send.id?msg -> Buffer(id, queue ^ <(msg, 2)>)  -- Fixed 2-step delay
+  
+  -- Deliver messages whose delay expired
+  [] (#queue > 0) & tock ->
+     let (msg, delay) = head(queue)
+         rest = tail(queue)
+     within
+       (if (delay <= 1)
+        then recv.id.msg -> Buffer(id, rest)
+        else Buffer(id, <(msg, delay-1)> ^ rest))
+  
+  [] (#queue == 0) & tock -> Buffer(id, queue)
+
+-- ----------------------------------------------------------------------------
+-- SYSTEM COMPOSITION
+-- ----------------------------------------------------------------------------
+
+RobotWithComm(id) =
+  (Robot(id) [|{|send.id, recv.id, tock|}|] DelayBuffer(id))
+  [|{|send.id, recv.id, tock|}|]
+  Acceptor(id)
+
+-- 3 robots synchronized on tock and obs events
+System = 
+  RobotWithComm(1)
+  [|{|tock, obs|}|]
+  (RobotWithComm(2)
+   [|{|tock, obs|}|]
+   RobotWithComm(3))
+
+-- ----------------------------------------------------------------------------
+-- HELPER FUNCTIONS
+-- ----------------------------------------------------------------------------
+
+InPlan(id, NoPlan) = false
+InPlan(id, GoldPlan.r1.r2) = (id == r1 or id == r2)
+
+GetPartner(id, GoldPlan.r1.r2) = if (id == r1) then r2 else r1
+GetPartner(id, NoPlan) = id
+
+-- ----------------------------------------------------------------------------
+-- SPECIFICATIONS
+-- ----------------------------------------------------------------------------
+
+-- Spec 1: Partners should successfully coordinate (no timeouts)
+NoPartnerTimeouts =
+  obs.PartnerTimeout?robot -> STOP  -- Partner timeout = coordination failure
+  [] obs.GoldPickedUp?r1?r2 -> NoPartnerTimeouts
+  [] obs.PaxosStuck?r -> NoPartnerTimeouts
+  [] tock -> NoPartnerTimeouts
+
+-- Spec 2: Robots should not get stuck in Paxos
+NoPaxosStuck =
+  obs.PaxosStuck?robot -> STOP  -- Robot stuck = deadlock
+  [] obs.GoldPickedUp?r1?r2 -> NoPaxosStuck
+  [] obs.PartnerTimeout?r -> NoPaxosStuck
+  [] tock -> NoPaxosStuck
+
+-- Spec 3: System should be deadlock-free
+-- (This checks if system can make progress)
+
+-- ----------------------------------------------------------------------------
+-- ASSERTIONS
+-- ----------------------------------------------------------------------------
+
+-- TEST 1: Partner coordination with delays
+-- EXPECTED: MAY FAIL - timeouts due to message delays
+assert NoPartnerTimeouts [T= System
+
+-- TEST 2: Paxos shouldn't get stuck
+-- EXPECTED: MAY FAIL - robots stuck waiting for promises
+assert NoPaxosStuck [T= System
+
+-- TEST 3: Overall deadlock freedom
+-- EXPECTED: SHOULD PASS (eventually makes progress)
+assert System :[deadlock free [F]]
+
+-- ============================================================================
+-- WHAT THIS DEMONSTRATES
+-- ============================================================================
+
+{-
+This model shows your CURRENT implementation (full.py) with message delays.
+
+Expected FDR4 Results:
+
+1. NoPartnerTimeouts - MAY FAIL
+   Counterexample shows:
+   - Robot 1 arrives at gold, sends AtGold
+   - Message delayed 2-3 steps
+   - Robot 2 still traveling
+   - Robot 1's timer reaches PARTNER_TIMEOUT = 20
+   - Robot 1 gives up (obs.PartnerTimeout.1)
+   - Robot 2 arrives later, no partner
+   - Coordination failed due to message delays!
+
+2. NoPaxosStuck - MAY FAIL  
+   Counterexample shows:
+   - Robot sends PREPARE
+   - Some promises arrive, others delayed
+   - Not enough for quorum
+   - No timeout recovery
+   - Robot stuck in Preparing state (obs.PaxosStuck.1)
+   - Demonstrates missing timeout mechanism
+
+3. Deadlock free - SHOULD PASS
+   - System doesn't fully deadlock
+   - But may have inefficiencies
+
+Key Issues Demonstrated:
+- Message delays cause partner coordination timeouts
+- Missing Paxos timeout recovery
+- Short PARTNER_TIMEOUT (20) insufficient with delays
+- These are PROTOCOL issues, not arithmetic bugs
+- CSP finds them systematically!
+
+Fix Strategy:
+- Increase PARTNER_TIMEOUT to 50
+- Add Paxos timeout recovery
+- Re-verify to ensure fixes work
+-}

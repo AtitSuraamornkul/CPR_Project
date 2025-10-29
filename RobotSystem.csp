@@ -1,0 +1,372 @@
+-- ============================================================================
+-- Formal CSP Model: Multi-Robot Gold Collection with Message Delays
+-- Based on your full.py implementation
+-- ============================================================================
+
+-- ----------------------------------------------------------------------------
+-- CONSTANTS AND TYPES
+-- ----------------------------------------------------------------------------
+
+-- Grid parameters
+GridSize = 20
+NumRobots = 10  -- per group
+NumGroups = 2
+
+-- Robot IDs
+Group1_IDs = {1..10}
+Group2_IDs = {11..20}
+All_IDs = union(Group1_IDs, Group2_IDs)
+
+-- Positions (simplified to key positions for verification)
+datatype Position = Pos.{0..19}.{0..19}
+Deposit1 = Pos.0.0
+Deposit2 = Pos.19.19
+
+-- Gold positions (example)
+GoldPositions = {Pos.5.5, Pos.10.10, Pos.15.15}
+
+-- Directions
+datatype Direction = North | South | East | West
+
+-- Message delay range
+MinDelay = 1
+MaxDelay = 5
+
+-- ----------------------------------------------------------------------------
+-- ROBOT STATES
+-- ----------------------------------------------------------------------------
+
+datatype RobotState 
+  = Idle 
+  | MovingToGold 
+  | WaitingAtGold 
+  | ReadyToPickup 
+  | CarryingGold 
+  | AtDeposit
+
+-- ----------------------------------------------------------------------------
+-- PAXOS STATES
+-- ----------------------------------------------------------------------------
+
+datatype PaxosState 
+  = PaxosIdle 
+  | Preparing 
+  | Proposing 
+  | Finished
+
+-- ----------------------------------------------------------------------------
+-- MESSAGE TYPES
+-- ----------------------------------------------------------------------------
+
+datatype Message
+  -- State updates
+  = StateUpdate.All_IDs.RobotState.Position.PaxosState
+  
+  -- Paxos messages
+  | PaxosPrepare.All_IDs.ProposalID
+  | PaxosPromise.All_IDs.ProposalID.AcceptedID.Plan
+  | PaxosAccept.All_IDs.ProposalID.Plan
+  | PaxosAccepted.All_IDs.ProposalID
+  | PaxosCommit.All_IDs.Plan
+  
+  -- Coordination messages
+  | AtGold.All_IDs.Position
+  | ReadyPickup.All_IDs.Position
+  | DropGold.All_IDs.Position
+
+-- Proposal IDs (robot_id * 100 + proposal_number)
+datatype ProposalID = PropID.{0..2000}
+
+-- Accepted proposal IDs
+datatype AcceptedID = NoAccepted | Accepted.ProposalID
+
+-- Plans (simplified: maps robot pairs to gold positions)
+datatype Plan = NoPlan | GoldPlan.All_IDs.All_IDs.Position
+
+-- ----------------------------------------------------------------------------
+-- EVENTS
+-- ----------------------------------------------------------------------------
+
+-- Observable events (for verification)
+channel obs : ObsEvent
+datatype ObsEvent
+  = RobotMove.All_IDs.Position
+  | GoldObserved.All_IDs.Position
+  | PickupAttempt.All_IDs.All_IDs.Position
+  | PickupSuccess.All_IDs.All_IDs.Position
+  | PickupFail.All_IDs.All_IDs.Position
+  | GoldDropped.Position
+  | GoldDeposited.All_IDs.All_IDs
+  | ProposalInitiated.All_IDs.ProposalID
+  | ConsensusReached.Plan
+  | Timeout.All_IDs
+
+-- Internal events
+channel send, receive : All_IDs.Message
+channel tock  -- Time step
+
+-- ----------------------------------------------------------------------------
+-- ROBOT FSM
+-- ----------------------------------------------------------------------------
+
+Robot(id, group) = let
+
+  -- Get group members
+  GroupMembers = if (group == 1) then Group1_IDs else Group2_IDs
+  DepositPos = if (group == 1) then Deposit1 else Deposit2
+  
+  -- -------------------------------------
+  -- State: Idle
+  -- -------------------------------------
+  
+  Idle(pos, proposal_num, backoff) = 
+    -- Observe gold
+    obs.GoldObserved.id?gold_pos -> 
+      (if (backoff == 0)
+       then ProposeOrExplore(pos, gold_pos, proposal_num)
+       else Idle(pos, proposal_num, backoff-1))
+    
+    -- Receive state update from teammate
+    [] receive.id.StateUpdate?teammate?state?tpos?pstate -> 
+       Idle(pos, proposal_num, backoff)
+    
+    -- Receive committed plan
+    [] receive.id.PaxosCommit?from?plan -> 
+       (if (plan != NoPlan and InPlan(id, plan))
+        then let target = GetTarget(id, plan)
+             within MovingToGold(pos, target, GetPartner(id, plan), proposal_num)
+        else Idle(pos, proposal_num, 0))
+    
+    -- Time passes
+    [] tock -> Idle(pos, proposal_num, max(0, backoff-1))
+  
+  ProposeOrExplore(pos, gold_pos, proposal_num) = 
+    -- Random chance to propose (30%)
+    obs.ProposalInitiated.id.PropID.(id*100 + proposal_num) ->
+    send.id.PaxosPrepare.id.PropID.(id*100 + proposal_num) ->
+    Preparing(pos, PropID.(id*100 + proposal_num), gold_pos, {}, proposal_num+1)
+    
+    [] tock -> Idle(pos, proposal_num+1, random(5,15))
+  
+  -- -------------------------------------
+  -- State: Preparing (Paxos Phase 1)
+  -- -------------------------------------
+  
+  Preparing(pos, pid, gold_pos, promises, pnum) = 
+    -- Receive promise
+    receive.id.PaxosPromise?from!pid?accepted_id?accepted_plan -> 
+      let new_promises = union(promises, {from})
+      within (if (#new_promises > #GroupMembers / 2)
+              then Proposing(pos, pid, gold_pos, {}, pnum)
+              else Preparing(pos, pid, gold_pos, new_promises, pnum))
+    
+    -- Timeout
+    [] tock -> 
+       (if (#promises < #GroupMembers / 2)
+        then obs.Timeout.id -> Idle(pos, pnum, random(5,15))
+        else Preparing(pos, pid, gold_pos, promises, pnum))
+  
+  -- -------------------------------------
+  -- State: Proposing (Paxos Phase 2)
+  -- -------------------------------------
+  
+  Proposing(pos, pid, gold_pos, accepts, pnum) = 
+    -- Send accept messages
+    send.id.PaxosAccept.id.pid.GoldPlan.id.id.gold_pos ->
+    WaitingAccepts(pos, pid, gold_pos, accepts, pnum)
+  
+  WaitingAccepts(pos, pid, gold_pos, accepts, pnum) = 
+    -- Receive accepted
+    receive.id.PaxosAccepted?from!pid -> 
+      let new_accepts = union(accepts, {from})
+      within (if (#new_accepts > #GroupMembers / 2)
+              then CommitPlan(pos, pid, gold_pos, pnum)
+              else WaitingAccepts(pos, pid, gold_pos, new_accepts, pnum))
+    
+    -- Timeout
+    [] tock -> 
+       (if (#accepts < #GroupMembers / 2)
+        then obs.Timeout.id -> Idle(pos, pnum, random(5,15))
+        else WaitingAccepts(pos, pid, gold_pos, accepts, pnum))
+  
+  CommitPlan(pos, pid, gold_pos, pnum) = 
+    let plan = GoldPlan.id.id.gold_pos
+    within obs.ConsensusReached.plan ->
+           send.id.PaxosCommit.id.plan ->
+           MovingToGold(pos, gold_pos, id, pnum)
+  
+  -- -------------------------------------
+  -- State: MovingToGold
+  -- -------------------------------------
+  
+  MovingToGold(pos, target, partner, pnum) = 
+    (if (pos == target)
+     then WaitingAtGold(pos, target, partner, 0, pnum)
+     else obs.RobotMove.id.target ->
+          tock -> MovingToGold(target, target, partner, pnum))
+  
+  -- -------------------------------------
+  -- State: WaitingAtGold
+  -- -------------------------------------
+  
+  WaitingAtGold(pos, gold_pos, partner, timer, pnum) = 
+    -- Notify partner
+    send.id.AtGold.id.gold_pos ->
+    CheckPartner(pos, gold_pos, partner, timer, pnum)
+  
+  CheckPartner(pos, gold_pos, partner, timer, pnum) = 
+    -- Partner ready
+    receive.id.ReadyPickup.partner.gold_pos ->
+    ReadyToPickup(pos, gold_pos, partner, pnum)
+    
+    -- Timeout
+    [] tock -> 
+       (if (timer > 20)
+        then obs.Timeout.id -> Idle(pos, pnum, 0)
+        else CheckPartner(pos, gold_pos, partner, timer+1, pnum))
+  
+  -- -------------------------------------
+  -- State: ReadyToPickup
+  -- -------------------------------------
+  
+  ReadyToPickup(pos, gold_pos, partner, pnum) = 
+    obs.PickupAttempt.id.partner.gold_pos ->
+    (obs.PickupSuccess.id.partner.gold_pos ->
+     CarryingGold(pos, DepositPos, partner, pnum)
+     
+     [] obs.PickupFail.id.partner.gold_pos ->
+        Idle(pos, pnum, 0))
+  
+  -- -------------------------------------
+  -- State: CarryingGold
+  -- -------------------------------------
+  
+  CarryingGold(pos, deposit, partner, pnum) = 
+    (if (pos == deposit)
+     then obs.GoldDeposited.id.partner ->
+          Idle(pos, pnum, 0)
+     else obs.RobotMove.id.deposit ->
+          tock -> CarryingGold(deposit, deposit, partner, pnum))
+    
+    -- Gold dropped if partners separate
+    [] obs.GoldDropped.pos -> Idle(pos, pnum, 0)
+
+within Idle(Pos.0.0, 0, 0)  -- Start at home position
+
+
+-- ----------------------------------------------------------------------------
+-- PAXOS ACCEPTOR (for receiving proposals)
+-- ----------------------------------------------------------------------------
+
+Acceptor(id) = AcceptorState(-1, NoAccepted, NoPlan)
+
+AcceptorState(highest_seen, accepted_id, accepted_plan) = 
+  -- Receive prepare
+  receive.id.PaxosPrepare?from?pid -> 
+    (if (pid >= PropID.highest_seen)
+     then send.id.PaxosPromise.id.pid.accepted_id.accepted_plan ->
+          AcceptorState(pid, accepted_id, accepted_plan)
+     else AcceptorState(highest_seen, accepted_id, accepted_plan))
+  
+  -- Receive accept
+  [] receive.id.PaxosAccept?from?pid?plan -> 
+     (if (pid >= PropID.highest_seen)
+      then send.id.PaxosAccepted.id.pid ->
+           AcceptorState(pid, Accepted.pid, plan)
+      else AcceptorState(highest_seen, accepted_id, accepted_plan))
+  
+  [] tock -> AcceptorState(highest_seen, accepted_id, accepted_plan)
+
+
+-- ----------------------------------------------------------------------------
+-- MESSAGE DELAY BUFFER
+-- ----------------------------------------------------------------------------
+
+DelayBuffer(id) = Buffer(<>)
+
+Buffer(queue) = 
+  -- Receive new message with random delay
+  send.id?msg -> 
+    let delay = random(MinDelay, MaxDelay)
+    within Buffer(queue ^ <(msg, delay)>)
+  
+  -- Deliver messages whose delay expired
+  [] (#queue > 0) & tock ->
+     let (msg, delay) = head(queue)
+     within (if (delay <= 1)
+             then receive.id.msg -> Buffer(tail(queue))
+             else Buffer(<(msg, delay-1)> ^ tail(queue)))
+  
+  [] (#queue == 0) & tock -> Buffer(queue)
+
+
+-- ----------------------------------------------------------------------------
+-- SYSTEM COMPOSITION
+-- ----------------------------------------------------------------------------
+
+-- Single robot with delay buffer
+RobotWithBuffer(id, group) = 
+  (Robot(id, group) [|{|send.id, receive.id|}|] DelayBuffer(id)) 
+  [|{|send.id, receive.id|}|] Acceptor(id)
+
+-- Full system (simplified to 2 robots for verification)
+RobotSystem = 
+  RobotWithBuffer(1, 1) [|{|tock, obs|}|] RobotWithBuffer(2, 1)
+
+
+-- ----------------------------------------------------------------------------
+-- SAFETY SPECIFICATIONS
+-- ----------------------------------------------------------------------------
+
+-- No two pairs can pick up the same gold
+NoDoublePickup = 
+  obs.PickupSuccess?r1?r2?pos -> 
+  ([] r3:diff(All_IDs, {r1,r2}) @ 
+   [] r4:diff(All_IDs, {r1,r2,r3}) @
+   obs.PickupSuccess.r3.r4.pos -> STOP)
+  [] tock -> NoDoublePickup
+
+-- Partners must be synchronized for pickup
+PartnerSync = 
+  obs.PickupAttempt?r1?r2?pos ->
+  (obs.PickupSuccess.r1.r2.pos -> PartnerSync
+   [] obs.PickupFail.r1.r2.pos -> PartnerSync)
+  [] tock -> PartnerSync
+
+-- At most one consensus per round
+PaxosSafety = 
+  obs.ConsensusReached?plan1 ->
+  ([] plan2:diff({NoPlan}, {plan1}) @ 
+   obs.ConsensusReached.plan2 -> STOP)
+  [] tock -> PaxosSafety
+
+
+-- ----------------------------------------------------------------------------
+-- VERIFICATION ASSERTIONS
+-- ----------------------------------------------------------------------------
+
+-- Safety properties
+assert NoDoublePickup [T= RobotSystem
+assert PartnerSync [T= RobotSystem
+assert PaxosSafety [T= RobotSystem
+
+-- Deadlock and livelock freedom
+assert RobotSystem \ {|obs|} :[deadlock free [F]]
+assert RobotSystem \ {|obs|} :[livelock free [FD]]
+
+-- Eventually make progress (liveness)
+-- assert RobotSystem :[divergence free]
+
+
+-- ----------------------------------------------------------------------------
+-- HELPER FUNCTIONS (to be defined based on your logic)
+-- ----------------------------------------------------------------------------
+
+InPlan(id, NoPlan) = false
+InPlan(id, GoldPlan.r1.r2.pos) = (id == r1 or id == r2)
+
+GetTarget(id, GoldPlan.r1.r2.pos) = pos
+
+GetPartner(id, GoldPlan.r1.r2.pos) = if (id == r1) then r2 else r1
+
+random(min, max) = min  -- Simplified for model checking
