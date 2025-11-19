@@ -104,33 +104,40 @@ class Robot:
         """Get deposit position for this robot's group"""
         return (0, 0) if self.group == 1 else (self.grid_size - 1, self.grid_size - 1)
     
-    def observe(self, grid_state: np.ndarray):
-        """Observe visible positions based on direction (3 front + 5 further)"""
-        self.observed_gold = []
+    def get_visible_positions(self) -> List[Tuple[int, int]]:
+        """Calculate visible positions based on direction"""
+        visible = []
         x, y = self.position
-        
-        # Get direction vectors
         dir_map = {'N': (0, -1), 'S': (0, 1), 'E': (1, 0), 'W': (-1, 0)}
         dx, dy = dir_map[self.direction]
         
-        # Perpendicular directions
         if self.direction in ['N', 'S']:
-            perp = [(1, 0), (-1, 0)]  # East, West
+            perp = [(1, 0), (-1, 0)]
         else:
-            perp = [(0, 1), (0, -1)]  # South, North
-        
-        # Front row (3 positions)
+            perp = [(0, 1), (0, -1)]
+            
+        # Front row
         front_x, front_y = x + dx, y + dy
         for offset_dx, offset_dy in [(-perp[0][0], -perp[0][1]), (0, 0), perp[0]]:
             pos = (front_x + offset_dx, front_y + offset_dy)
-            if self._is_valid_pos(pos) and grid_state[pos] == 1:
-                self.observed_gold.append(pos)
-        
-        # Second row (5 positions)
+            if self._is_valid_pos(pos):
+                visible.append(pos)
+                
+        # Second row
         front2_x, front2_y = front_x + dx, front_y + dy
         for i in range(-2, 3):
             pos = (front2_x + i * perp[0][0], front2_y + i * perp[0][1])
-            if self._is_valid_pos(pos) and grid_state[pos] == 1:
+            if self._is_valid_pos(pos):
+                visible.append(pos)
+        return visible
+
+    def observe(self, grid_state: np.ndarray):
+        """Observe visible positions based on direction (3 front + 5 further)"""
+        self.observed_gold = []
+        visible_pos = self.get_visible_positions()
+        
+        for pos in visible_pos:
+            if grid_state[pos] == 1:
                 self.observed_gold.append(pos)
     
     def _is_valid_pos(self, pos: Tuple[int, int]) -> bool:
@@ -255,14 +262,30 @@ class Robot:
         
         # READY TO PICKUP - execute pickup
         if self.state == "ready_to_pickup":
+            # Transition to carrying_gold if pickup was successful
+            if self.holding_gold:
+                self.state = "carrying_gold"
+                return "idle"
             return "pickup"
         
         # WAITING AT GOLD - wait for partner to arrive
         if self.state == "waiting_at_gold":
-            # Check if gold still exists
-            if self.target_gold_pos and not grid_state[self.target_gold_pos] > 0:
-                self._reset_to_exploring()
-                return "idle"
+            # Check if partner is here
+            if self.carrying_with in self.teammate_states:
+                partner_state = self.teammate_states[self.carrying_with]
+                # Check if partner is at the same position and also waiting
+                # We rely on received state updates
+                if (tuple(partner_state.get("position")) == self.position and 
+                    partner_state.get("state") in ["waiting_at_gold", "ready_to_pickup"]):
+                    self.state = "ready_to_pickup"
+                    return "idle"
+
+            # Check if gold still exists (using local sensing)
+            # Since we are at the position, we can sense it directly
+            if self.position == self.target_gold_pos:
+                 if not grid_state[self.position] > 0:
+                     self._reset_to_exploring()
+                     return "idle"
             
             # Timeout after waiting too long
             self.wait_timer += 1
@@ -272,8 +295,6 @@ class Robot:
                 self.wait_timer = 0
                 return "idle"
             
-            # Note: Pickup readiness will be checked in _execute_actions
-            # where we can see actual positions without message delay
             return "idle"
         
         # MOVING TO GOLD - navigate to gold position
@@ -283,10 +304,13 @@ class Robot:
                 self.wait_timer = 0  # Reset timer when arriving
                 return "idle"
             
-            if not grid_state[self.target_gold_pos] > 0:
-                # Gold gone, reset
-                self._reset_to_exploring()
-                return "idle"
+            # Check if gold is missing (only if visible)
+            visible_pos = self.get_visible_positions()
+            if self.target_gold_pos in visible_pos:
+                if not grid_state[self.target_gold_pos] > 0:
+                    # Gold gone, reset
+                    self._reset_to_exploring()
+                    return "idle"
             
             return self._get_move_action_towards(self.target_gold_pos)
         
@@ -558,8 +582,8 @@ class Simulation:
                 print("\nAll gold has been deposited! Ending simulation.")
                 break
 
-            #if step < self.steps - 1:
-            #   time.sleep(0.15)
+            if step < self.steps - 1:
+               time.sleep(0.15)
             
             step += 1
         
@@ -618,20 +642,6 @@ class Simulation:
     def _execute_actions(self, all_robots):
         """Execute robot actions and handle game mechanics"""
         
-        # First, check for partners at same position and transition to ready_to_pickup
-        # This avoids relying on delayed state messages
-        for robot in all_robots:
-            if robot.state == "waiting_at_gold" and robot.carrying_with is not None:
-                partner = next((r for r in all_robots if r.id == robot.carrying_with), None)
-                if partner and partner.state == "waiting_at_gold":
-                    if robot.position == partner.position == robot.target_gold_pos:
-                        # Both at gold, ready to pickup
-                        robot.state = "ready_to_pickup"
-                        partner.state = "ready_to_pickup"
-                        robot.wait_timer = 0
-                        partner.wait_timer = 0
-                        print(f"DEBUG: R{robot.id} & R{partner.id} both ready at {robot.position}")
-        
         # Group pickup attempts by position
         pickup_attempts = defaultdict(lambda: defaultdict(list))
         actions = {}
@@ -667,12 +677,7 @@ class Simulation:
                         
                         robots_at_pos[0].holding_gold = True
                         robots_at_pos[1].holding_gold = True
-                        robots_at_pos[0].state = "carrying_gold"
-                        robots_at_pos[1].state = "carrying_gold"
-                        
-                        # Ensure they're partners
-                        robots_at_pos[0].carrying_with = robots_at_pos[1].id
-                        robots_at_pos[1].carrying_with = robots_at_pos[0].id
+                        # Robot states are updated by the robots themselves
                         
                         print(f"DEBUG: Group {group} picked up gold at {pos}")
         
