@@ -91,6 +91,7 @@ class Robot:
 
         # State-related timers
         self.wait_timer = 0
+        self.pickup_timer = 0
 
         # Communication
         self.message_inbox: List[Dict] = []
@@ -108,13 +109,17 @@ class Robot:
         """Calculate visible positions based on direction"""
         visible = []
         x, y = self.position
-        dir_map = {'N': (0, -1), 'S': (0, 1), 'E': (1, 0), 'W': (-1, 0)}
+        # Coordinates are (row, col). Interpret directions as:
+        # N: up (row-1), S: down (row+1), E: right (col+1), W: left (col-1)
+        dir_map = {'N': (-1, 0), 'S': (1, 0), 'E': (0, 1), 'W': (0, -1)}
         dx, dy = dir_map[self.direction]
         
+        # Perpendicular offsets: for vertical motion, vary columns; for
+        # horizontal motion, vary rows.
         if self.direction in ['N', 'S']:
-            perp = [(1, 0), (-1, 0)]
+            perp = [(0, 1), (0, -1)]  # right, left
         else:
-            perp = [(0, 1), (0, -1)]
+            perp = [(1, 0), (-1, 0)]  # down, up
             
         # Front row
         front_x, front_y = x + dx, y + dy
@@ -131,13 +136,15 @@ class Robot:
                 visible.append(pos)
         return visible
 
-    def observe(self, grid_state: np.ndarray):
+    def observe(self, visible_cells: Dict[Tuple[int, int], int]):
         """Observe visible positions based on direction (3 front + 5 further)"""
         self.observed_gold = []
+        # We strictly use the passed visible_cells which contains the "slice" of reality
         visible_pos = self.get_visible_positions()
         
         for pos in visible_pos:
-            if grid_state[pos] == 1:
+            # Only record gold if it's in our provided view (it should be) and equals 1
+            if pos in visible_cells and visible_cells[pos] == 1:
                 self.observed_gold.append(pos)
     
     def _is_valid_pos(self, pos: Tuple[int, int]) -> bool:
@@ -244,18 +251,16 @@ class Robot:
         
         self.message_inbox.clear()
     
-    def decide_action(self, grid_state: np.ndarray) -> str:
+    def decide_action(self, visible_cells: Dict[Tuple[int, int], int]) -> str:
         """Main decision logic based on finder-helper protocol state machine"""
         
         # CARRYING GOLD - move to deposit
         if self.state == "carrying_gold" and self.holding_gold:
             deposit = self.get_deposit_pos()
             if self.position == deposit:
-                if self.carrying_with in self.teammate_states:
-                    partner_state = self.teammate_states[self.carrying_with]
-                    if partner_state.get("position") == self.position:
-                        self.state = "at_deposit"
-                        return "idle"
+                # Immediately transition to at_deposit when we reach the deposit
+                # The simulation's _execute_actions will handle checking if both robots are physically present
+                self.state = "at_deposit"
                 return "idle"
             
             return self._get_move_action_towards(deposit)
@@ -265,7 +270,16 @@ class Robot:
             # Transition to carrying_gold if pickup was successful
             if self.holding_gold:
                 self.state = "carrying_gold"
+                self.pickup_timer = 0
                 return "idle"
+            
+            # Timeout if stuck (likely due to crowding - more than 2 robots at same location)
+            self.pickup_timer += 1
+            if self.pickup_timer > 5:
+                print(f"DEBUG: R{self.id} timed out in ready_to_pickup (likely crowding), resetting")
+                self._reset_to_exploring()
+                return "idle"
+            
             return "pickup"
         
         # WAITING AT GOLD - wait for partner to arrive
@@ -278,12 +292,13 @@ class Robot:
                 if (tuple(partner_state.get("position")) == self.position and 
                     partner_state.get("state") in ["waiting_at_gold", "ready_to_pickup"]):
                     self.state = "ready_to_pickup"
+                    self.pickup_timer = 0  # Reset timer when entering this state
                     return "idle"
 
             # Check if gold still exists (using local sensing)
-            # Since we are at the position, we can sense it directly
-            if self.position == self.target_gold_pos:
-                 if not grid_state[self.position] > 0:
+            # Since we are at the position, we can sense it directly (if passed in visible_cells)
+            if self.position in visible_cells:
+                 if not visible_cells[self.position] > 0:
                      self._reset_to_exploring()
                      return "idle"
             
@@ -305,9 +320,8 @@ class Robot:
                 return "idle"
             
             # Check if gold is missing (only if visible)
-            visible_pos = self.get_visible_positions()
-            if self.target_gold_pos in visible_pos:
-                if not grid_state[self.target_gold_pos] > 0:
+            if self.target_gold_pos in visible_cells:
+                if not visible_cells[self.target_gold_pos] > 0:
                     # Gold gone, reset
                     self._reset_to_exploring()
                     return "idle"
@@ -465,16 +479,20 @@ class Robot:
         self.current_message_index = None
         self.timeout_counter = 0
         self.wait_timer = 0
+        self.pickup_timer = 0
     
     def _get_move_action_towards(self, target: Tuple[int, int]) -> str:
         """Get action to move towards target"""
         dx = target[0] - self.position[0]
         dy = target[1] - self.position[1]
         
+        # Coordinates are (row, col). Rows correspond to N/S, columns to E/W.
         if abs(dx) > abs(dy):
-            desired = 'E' if dx > 0 else 'W'
+            # Move mostly vertically
+            desired = 'S' if dx > 0 else 'N'
         else:
-            desired = 'N' if dy < 0 else 'S'
+            # Move mostly horizontally
+            desired = 'E' if dy > 0 else 'W'
         
         if self.direction != desired:
             if self._should_turn_left(desired):
@@ -498,7 +516,8 @@ class Robot:
     def execute_action(self, action: str):
         """Execute the decided action"""
         if action == "move":
-            dir_map = {'N': (0, -1), 'S': (0, 1), 'E': (1, 0), 'W': (-1, 0)}
+            # Move according to (row, col) convention
+            dir_map = {'N': (-1, 0), 'S': (1, 0), 'E': (0, 1), 'W': (0, -1)}
             dx, dy = dir_map[self.direction]
             new_pos = (self.position[0] + dx, self.position[1] + dy)
             if self._is_valid_pos(new_pos):
@@ -514,11 +533,11 @@ class Robot:
             idx = dirs.index(self.direction)
             self.direction = dirs[(idx + 1) % 4]
     
-    def update(self, grid_state: np.ndarray):
+    def update(self, visible_cells: Dict[Tuple[int, int], int]):
         """Main update loop: observe, process messages, decide, execute"""
-        self.observe(grid_state)
+        self.observe(visible_cells)
         self.process_messages()
-        action = self.decide_action(grid_state)
+        action = self.decide_action(visible_cells)
         self.next_action = action
         self._broadcast_my_state()
 
@@ -561,7 +580,18 @@ class Simulation:
             self._process_messages(all_robots)
 
             for robot in all_robots:
-                robot.update(self.grid.grid)
+                # Strict Mode: Calculate visible cells outside the robot
+                visible_cells = {}
+                
+                # 1. Vision (Front cone)
+                for pos in robot.get_visible_positions():
+                    visible_cells[pos] = self.grid.get_cell(pos)
+                
+                # 2. Proprioception/Touch (Current position)
+                # Robot needs to know if it is standing on gold
+                visible_cells[robot.position] = self.grid.get_cell(robot.position)
+                
+                robot.update(visible_cells)
 
             self._execute_actions(all_robots)
 
@@ -582,8 +612,8 @@ class Simulation:
                 print("\nAll gold has been deposited! Ending simulation.")
                 break
 
-            if step < self.steps - 1:
-               time.sleep(0.15)
+            #if step < self.steps - 1:
+            #   time.sleep(0.15)
             
             step += 1
         
