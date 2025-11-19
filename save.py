@@ -18,8 +18,15 @@ class Direction(Enum):
     EAST = (1, 0)
     WEST = (-1, 0)
 
-# Finder-Helper Protocol (from new.md)
-# Messages: found, response, ack, here, ack2
+@dataclass
+class PaxosMessage:
+    """Message for Paxos consensus protocol"""
+    msg_type: str  # 'prepare', 'promise', 'accept', 'accepted'
+    proposal_id: int
+    sender_id: int
+    value: Optional[Any] = None
+    accepted_id: Optional[int] = None
+    accepted_value: Optional[Any] = None
 
 class Grid:
     def __init__(self, size=20, num_gold=30):
@@ -62,32 +69,28 @@ class Robot:
         self.grid_size = grid_size
         
         # State machine states: 
-        # "exploring" -> searching for gold
-        # "finder_waiting_response" -> sent found message, waiting for response
-        # "finder_waiting_here" -> sent ack, waiting for helper at opposite
-        # "finder_ready" -> helper at opposite, ready to move to gold
-        # "helper_waiting_ack" -> sent response, waiting for ack
-        # "helper_moving_opposite" -> acknowledged, moving to opposite position
-        # "helper_waiting_ack2" -> at opposite, sent here, waiting for ack2
-        # "moving_to_gold" -> moving to gold position
-        # "waiting_at_gold" -> at gold, waiting for partner
-        # "ready_to_pickup" -> both at gold, ready to pickup
-        # "carrying_gold" -> holding gold, moving to deposit
-        # "at_deposit" -> at deposit with gold
-        self.state = "exploring"
+        # "idle" -> exploring/searching
+        # "moving_to_gold" -> found gold, moving towards it
+        # "waiting_at_gold" -> at gold position, waiting for partner
+        # "ready_to_pickup" -> partner arrived, ready to pickup
+        # "carrying_gold" -> holding gold with partner, moving to deposit
+        # "at_deposit" -> reached deposit with gold
+        self.state = "idle"
         self.holding_gold = False
         self.carrying_with: Optional[int] = None
         self.target_gold_pos: Optional[Tuple[int, int]] = None
         self.next_action: Optional[str] = None
         
-        # Finder-Helper Protocol State
-        self.role = 'exploring'  # 'exploring', 'finder', 'helper'
-        self.message_index = 0  # Unique index for each found message
-        self.finder_id: Optional[int] = None
-        self.helper_id: Optional[int] = None
-        self.current_message_index: Optional[int] = None  # Track current conversation
-        self.timeout_counter = 0
-        self.max_timeout = 15  # Steps before retrying
+        # Paxos state (fully decentralized - no leader role)
+        self.proposal_number = 0
+        self.highest_proposal_seen = -1
+        self.accepted_proposal = -1
+        self.accepted_value = None
+        self.paxos_state = 'idle'  # idle, preparing, proposing, finished
+        self.promises_received = set()
+        self.accepts_received = set()
+        self.current_plan = None
+        self.proposal_backoff = 0  # Backoff timer before proposing again
 
         # State-related timers
         self.wait_timer = 0
@@ -137,8 +140,13 @@ class Robot:
         x, y = pos
         return 0 <= x < self.grid_size and 0 <= y < self.grid_size
     
+    def get_next_proposal_number(self):
+        """Generate unique proposal number"""
+        self.proposal_number += 1
+        return self.proposal_number * 100 + self.id
+    
     def process_messages(self):
-        """Process incoming messages using finder-helper protocol"""
+        """Process incoming messages"""
         for msg in self.message_inbox:
             msg_type = msg.get("type")
             sender_id = msg.get("sender_id")
@@ -148,99 +156,113 @@ class Robot:
                 teammate_id = msg["sender_id"]
                 self.teammate_states[teammate_id] = msg["content"]
 
-            # FINDER-HELPER PROTOCOL MESSAGES
-            elif msg_type == "found":
-                # Robot exploring receives found message from potential finder
-                if self.role == 'exploring' and self.state == "exploring":
-                    finder_id = content.get("finder_id")
-                    msg_index = content.get("index")
-                    gold_pos = tuple(content.get("gold_pos"))
-                    finder_pos = tuple(content.get("finder_pos"))
-                    
-                    # Send response to offer help
+            elif msg_type == "paxos_prepare":
+                proposal_id = content.get("proposal_id")
+                if proposal_id >= self.highest_proposal_seen:
+                    self.highest_proposal_seen = proposal_id
+                    self.paxos_state = 'preparing' # Show we are engaged in a paxos round
                     self.message_outbox.append({
-                        "type": "response",
+                        "type": "paxos_promise",
                         "sender_id": self.id,
-                        "recipient_id": finder_id,
+                        "recipient_id": sender_id,
                         "content": {
-                            "helper_id": self.id,
-                            "finder_id": finder_id,
-                            "index": msg_index
+                            "proposal_id": proposal_id,
+                            "accepted_proposal": self.accepted_proposal,
+                            "accepted_value": self.accepted_value
                         }
                     })
-                    self.state = "helper_waiting_ack"
-                    self.role = 'helper'
-                    self.finder_id = finder_id
-                    self.target_gold_pos = gold_pos
-                    self.current_message_index = msg_index
 
-            elif msg_type == "response":
-                # Finder receives response from potential helper
-                if self.role == 'finder' and self.state == "finder_waiting_response":
-                    helper_id = content.get("helper_id")
-                    msg_index = content.get("index")
-                    
-                    if msg_index == self.current_message_index:
-                        # Accept first response
-                        self.helper_id = helper_id
-                        self.carrying_with = helper_id
-                        self.message_outbox.append({
-                            "type": "ack",
-                            "sender_id": self.id,
-                            "recipient_id": helper_id,
-                            "content": {
-                                "finder_id": self.id,
-                                "helper_id": helper_id,
-                                "index": msg_index
-                            }
-                        })
-                        self.state = "finder_waiting_here"
-                        self.timeout_counter = 0
+            elif msg_type == "paxos_promise":
+                # Any robot initiating a proposal can receive promises
+                if self.paxos_state == 'preparing':
+                    proposal_id = content.get("proposal_id")
+                    if proposal_id == self.highest_proposal_seen:
+                        self.promises_received.add(sender_id)
+                        if content.get("accepted_proposal", -1) > self.accepted_proposal:
+                            self.accepted_proposal = content["accepted_proposal"]
+                            self.accepted_value = content["accepted_value"]
+                        
+                        num_teammates = len(self.teammate_states) + 1
+                        if len(self.promises_received) > num_teammates / 2:
+                            self.paxos_state = 'proposing'
+                            # Send ACCEPT to all known teammates and self
+                            all_known_teammates = list(self.teammate_states.keys()) + [self.id]
+                            for teammate_id in all_known_teammates:
+                                self.message_outbox.append({
+                                    "type": "paxos_accept",
+                                    "sender_id": self.id,
+                                    "recipient_id": teammate_id,
+                                    "content": {
+                                        "proposal_id": self.highest_proposal_seen,
+                                        "value": self.accepted_value
+                                    }
+                                })
+            
+            elif msg_type == "paxos_accept":
+                proposal_id = content.get("proposal_id")
+                if proposal_id >= self.highest_proposal_seen:
+                    self.accepted_proposal = proposal_id
+                    self.accepted_value = content.get("value")
+                    self.paxos_state = 'proposing'
+                    self.message_outbox.append({
+                        "type": "paxos_accepted",
+                        "sender_id": self.id,
+                        "recipient_id": sender_id,
+                        "content": {"proposal_id": proposal_id}
+                    })
 
-            elif msg_type == "ack":
-                # Helper receives ack from finder (selected!)
-                if self.role == 'helper' and self.state == "helper_waiting_ack":
-                    helper_id = content.get("helper_id")
-                    msg_index = content.get("index")
-                    
-                    if helper_id == self.id and msg_index == self.current_message_index:
-                        # I was selected!
-                        self.carrying_with = self.finder_id
-                        self.state = "helper_moving_opposite"
-                        self.timeout_counter = 0
-                    elif msg_index == self.current_message_index:
-                        # Someone else was selected
-                        self.role = 'exploring'
-                        self.state = "exploring"
-                        self.finder_id = None
-                        self.target_gold_pos = None
-                        self.current_message_index = None
+            elif msg_type == "paxos_accepted":
+                # Any robot proposing can receive accepts
+                if self.paxos_state == 'proposing':
+                    proposal_id = content.get("proposal_id")
+                    if proposal_id == self.highest_proposal_seen:
+                        self.accepts_received.add(sender_id)
+                        
+                        num_teammates = len(self.teammate_states) + 1
+                        if len(self.accepts_received) > num_teammates / 2:
+                            self.paxos_state = 'finished'
+                            self.current_plan = self.accepted_value
+                            
+                            all_known_teammates = list(self.teammate_states.keys()) + [self.id]
+                            for teammate_id in all_known_teammates:
+                                self.message_outbox.append({
+                                    "type": "paxos_commit",
+                                    "sender_id": self.id,
+                                    "recipient_id": teammate_id,
+                                    "content": {"plan": self.current_plan}
+                                })
+                            
+                            self.promises_received = set()
+                            self.accepts_received = set()
+                            self.proposal_backoff = 0
 
-            elif msg_type == "here":
-                # Finder receives here message (helper at opposite position)
-                if self.role == 'finder' and self.state == "finder_waiting_here":
-                    helper_id = content.get("helper_id")
-                    msg_index = content.get("index")
-                    
-                    if helper_id == self.helper_id and msg_index == self.current_message_index:
-                        self.state = "finder_ready"
-                        self.timeout_counter = 0
-
-            elif msg_type == "ack2":
-                # Helper receives ack2 from finder (ready to pickup)
-                if self.role == 'helper' and self.state == "helper_waiting_ack2":
-                    msg_index = content.get("index")
-                    
-                    if msg_index == self.current_message_index:
-                        self.state = "moving_to_gold"
-                        self.timeout_counter = 0
+            elif msg_type == "paxos_commit":
+                self.current_plan = content.get("plan")
+                self.paxos_state = 'idle'
+                self.proposal_backoff = 0  # Reset backoff when plan received
+            
+            elif msg_type == "at_gold":
+                if sender_id == self.carrying_with:
+                    if self.position == self.target_gold_pos:
+                        self.state = "ready_to_pickup"
+            
+            elif msg_type == "ready_pickup":
+                if sender_id == self.carrying_with:
+                    if self.position == self.target_gold_pos and self.position == tuple(content["pos"]):
+                        self.state = "ready_to_pickup"
+            
+            elif msg_type == "drop_gold":
+                if sender_id == self.carrying_with:
+                    self.holding_gold = False
+                    self.carrying_with = None
+                    self.state = "idle"
+                    self.target_gold_pos = None
         
         self.message_inbox.clear()
     
     def decide_action(self, grid_state: np.ndarray) -> str:
-        """Main decision logic based on finder-helper protocol state machine"""
+        """Main decision logic based on state machine"""
         
-        # CARRYING GOLD - move to deposit
         if self.state == "carrying_gold" and self.holding_gold:
             deposit = self.get_deposit_pos()
             if self.position == deposit:
@@ -251,196 +273,131 @@ class Robot:
                         return "idle"
                 return "idle"
             
-            return self._get_move_action_towards(deposit)
+            action = self._get_move_action_towards(deposit)
+            return action
         
-        # READY TO PICKUP - execute pickup
         if self.state == "ready_to_pickup":
             return "pickup"
         
-        # WAITING AT GOLD - wait for partner to arrive
         if self.state == "waiting_at_gold":
-            # Check if gold still exists
-            if self.target_gold_pos and not grid_state[self.target_gold_pos] > 0:
-                self._reset_to_exploring()
-                return "idle"
-            
-            # Timeout after waiting too long
             self.wait_timer += 1
-            if self.wait_timer > 30:
-                print(f"DEBUG: R{self.id} timed out waiting at gold, resetting")
-                self._reset_to_exploring()
+            if self.position != self.target_gold_pos:
+                self.state = "moving_to_gold"
+                self.wait_timer = 0
+                return self._get_move_action_towards(self.target_gold_pos)
+            
+            if self.carrying_with in self.teammate_states:
+                partner_state = self.teammate_states[self.carrying_with]
+                if partner_state.get("position") == self.position and partner_state.get("state") in ["waiting_at_gold", "ready_to_pickup"]:
+                    self.state = "ready_to_pickup"
+                    self.wait_timer = 0
+                    self.message_outbox.append({"type": "ready_pickup", "sender_id": self.id, "recipient_id": self.carrying_with, "content": {"pos": self.position}})
+                    return "idle"
+            
+            if not grid_state[self.target_gold_pos] > 0:
+                self.state = "idle"
+                self.carrying_with = None
+                self.target_gold_pos = None
+                self.paxos_state = 'idle'
+                self.wait_timer = 0
+                return "idle"
+
+            if self.wait_timer > 20:
+                self.state = "idle"
+                self.carrying_with = None
+                self.target_gold_pos = None
+                self.paxos_state = 'idle'
                 self.wait_timer = 0
                 return "idle"
             
-            # Note: Pickup readiness will be checked in _execute_actions
-            # where we can see actual positions without message delay
             return "idle"
         
-        # MOVING TO GOLD - navigate to gold position
         if self.state == "moving_to_gold" and self.target_gold_pos:
             if self.position == self.target_gold_pos:
                 self.state = "waiting_at_gold"
-                self.wait_timer = 0  # Reset timer when arriving
+                if self.carrying_with is not None:
+                    self.message_outbox.append({"type": "at_gold", "sender_id": self.id, "recipient_id": self.carrying_with, "content": {"pos": self.position}})
+                
+                if self.carrying_with in self.teammate_states:
+                    partner_state = self.teammate_states[self.carrying_with]
+                    if partner_state.get("position") == self.position and partner_state.get("state") in ["waiting_at_gold", "ready_to_pickup"]:
+                        self.state = "ready_to_pickup"
+                        self.message_outbox.append({"type": "ready_pickup", "sender_id": self.id, "recipient_id": self.carrying_with, "content": {"pos": self.position}})
+                
                 return "idle"
             
             if not grid_state[self.target_gold_pos] > 0:
-                # Gold gone, reset
-                self._reset_to_exploring()
+                self.state = "idle"
+                self.carrying_with = None
+                self.target_gold_pos = None
                 return "idle"
             
             return self._get_move_action_towards(self.target_gold_pos)
         
-        # FINDER STATES
-        if self.state == "finder_waiting_response":
-            # Timeout and retry
-            self.timeout_counter += 1
-            if self.timeout_counter > self.max_timeout:
-                # Retry sending found message
-                self._send_found_message()
-                self.timeout_counter = 0
-            return "idle"
-        
-        if self.state == "finder_waiting_here":
-            # Wait for helper to reach opposite position
-            self.timeout_counter += 1
-            if self.timeout_counter > self.max_timeout:
-                # Timeout, reset
-                self._reset_to_exploring()
-            return "idle"
-        
-        if self.state == "finder_ready":
-            # Move to gold and send ack2
-            if self.position == self.target_gold_pos:
-                # Already at gold, send ack2
-                self.message_outbox.append({
-                    "type": "ack2",
-                    "sender_id": self.id,
-                    "recipient_id": self.helper_id,
-                    "content": {
-                        "finder_id": self.id,
-                        "helper_id": self.helper_id,
-                        "index": self.current_message_index
-                    }
-                })
-                self.state = "moving_to_gold"  # Will transition to waiting_at_gold
-                return "idle"
-            else:
-                # Move to gold
-                action = self._get_move_action_towards(self.target_gold_pos)
-                # Once we start moving, send ack2
-                if action == "move":
-                    self.message_outbox.append({
-                        "type": "ack2",
-                        "sender_id": self.id,
-                        "recipient_id": self.helper_id,
-                        "content": {
-                            "finder_id": self.id,
-                            "helper_id": self.helper_id,
-                            "index": self.current_message_index
-                        }
-                    })
-                    self.state = "moving_to_gold"
-                return action
-        
-        # HELPER STATES
-        if self.state == "helper_waiting_ack":
-            # Wait for ack or timeout
-            self.timeout_counter += 1
-            if self.timeout_counter > self.max_timeout:
-                # Not selected, go back to exploring
-                self._reset_to_exploring()
-            return "idle"
-        
-        if self.state == "helper_moving_opposite":
-            # Calculate opposite position
-            if self.target_gold_pos:
-                opposite_pos = self._get_opposite_position(self.target_gold_pos)
-                
-                if self.position == opposite_pos:
-                    # Reached opposite, send here message
-                    self.message_outbox.append({
-                        "type": "here",
-                        "sender_id": self.id,
-                        "recipient_id": self.finder_id,
-                        "content": {
-                            "helper_id": self.id,
-                            "finder_id": self.finder_id,
-                            "index": self.current_message_index
-                        }
-                    })
-                    self.state = "helper_waiting_ack2"
-                    self.timeout_counter = 0
+        if self.state == "idle":
+            # Execute plan if we have one
+            if self.current_plan and self.id in self.current_plan:
+                assignment = self.current_plan[self.id]
+                self.state = "moving_to_gold"
+                self.target_gold_pos = assignment["gold_pos"]
+                self.carrying_with = assignment["partner_id"]
+                self.paxos_state = 'idle'
+                self.current_plan = None
+                return self._get_move_action_towards(self.target_gold_pos)
+
+            # Decrement backoff timer
+            if self.proposal_backoff > 0:
+                self.proposal_backoff -= 1
+
+            # DECENTRALIZED: Any idle robot can propose when they see gold
+            idle_teammate_ids = [r_id for r_id, r_state in self.teammate_states.items() 
+                               if r_state.get("state") == 'idle' and r_state.get("paxos_state") == 'idle']
+            all_idle_ids = idle_teammate_ids + [self.id] if self.paxos_state == 'idle' else idle_teammate_ids
+
+            if not all_idle_ids:
+                return "move"
+
+            # Any robot can initiate proposal if they observe gold and backoff has expired
+            if self.observed_gold and self.paxos_state == 'idle' and self.proposal_backoff == 0:
+                # Random chance to propose (reduces simultaneous proposals)
+                if random.random() < 0.3:  # 30% chance to initiate
+                    self.paxos_state = 'preparing'
+                    available_robot_ids = all_idle_ids.copy()
+                    available_gold = set(self.observed_gold)
+                    plan = {}
+
+                    while len(available_robot_ids) >= 2 and available_gold:
+                        robot1_id = available_robot_ids.pop(0)
+                        robot2_id = available_robot_ids.pop(0)
+                        robot1_pos = self.position
+                        target_gold = min(available_gold, key=lambda g: abs(g[0]-robot1_pos[0]) + abs(g[1]-robot1_pos[1]))
+                        available_gold.remove(target_gold)
+                        plan[robot1_id] = {"partner_id": robot2_id, "gold_pos": target_gold}
+                        plan[robot2_id] = {"partner_id": robot1_id, "gold_pos": target_gold}
+
+                    if plan:
+                        proposal_id = self.get_next_proposal_number()
+                        self.highest_proposal_seen = proposal_id
+                        self.accepted_value = plan
+                        for teammate_id in self.teammate_states.keys():
+                            self.message_outbox.append({
+                                "type": "paxos_prepare", 
+                                "sender_id": self.id, 
+                                "recipient_id": teammate_id, 
+                                "content": {"proposal_id": proposal_id}
+                            })
+                        self.promises_received = {self.id}
+                        # Set random backoff if proposal fails
+                        self.proposal_backoff = random.randint(5, 15)
+                    
                     return "idle"
-                
-                return self._get_move_action_towards(opposite_pos)
-            return "idle"
-        
-        if self.state == "helper_waiting_ack2":
-            # Wait for ack2 from finder
-            self.timeout_counter += 1
-            if self.timeout_counter > self.max_timeout:
-                # Timeout, reset
-                self._reset_to_exploring()
-            return "idle"
-        
-        # EXPLORING STATE - look for gold
-        if self.state == "exploring":
-            # If see gold, become finder
-            if self.observed_gold and self.role == 'exploring':
-                # Become finder
-                self.role = 'finder'
-                self.target_gold_pos = self.observed_gold[0]  # Pick first visible gold
-                self.message_index += 1
-                self.current_message_index = self.message_index
-                self._send_found_message()
-                self.state = "finder_waiting_response"
-                self.timeout_counter = 0
-                return "idle"
-            
+
             # Random exploration
             if random.random() < 0.2:
                 return random.choice(["turn_left", "turn_right"])
             return "move"
         
         return "idle"
-    
-    def _send_found_message(self):
-        """Send found message to all teammates"""
-        self.message_outbox.append({
-            "type": "found",
-            "sender_id": self.id,
-            "broadcast": True,
-            "content": {
-                "finder_id": self.id,
-                "index": self.current_message_index,
-                "gold_pos": self.target_gold_pos,
-                "finder_pos": self.position
-            }
-        })
-    
-    def _get_opposite_position(self, gold_pos: Tuple[int, int]) -> Tuple[int, int]:
-        """Calculate opposite position across gold from finder"""
-        # Simple heuristic: mirror across gold position
-        gx, gy = gold_pos
-        # Try positions adjacent to gold
-        candidates = [(gx+1, gy), (gx-1, gy), (gx, gy+1), (gx, gy-1)]
-        valid_candidates = [pos for pos in candidates if self._is_valid_pos(pos)]
-        if valid_candidates:
-            # Pick closest to current position
-            return min(valid_candidates, key=lambda p: abs(p[0]-self.position[0]) + abs(p[1]-self.position[1]))
-        return gold_pos
-    
-    def _reset_to_exploring(self):
-        """Reset robot to exploring state"""
-        self.role = 'exploring'
-        self.state = "exploring"
-        self.finder_id = None
-        self.helper_id = None
-        self.carrying_with = None
-        self.target_gold_pos = None
-        self.current_message_index = None
-        self.timeout_counter = 0
-        self.wait_timer = 0
     
     def _get_move_action_towards(self, target: Tuple[int, int]) -> str:
         """Get action to move towards target"""
@@ -506,7 +463,7 @@ class Robot:
             "broadcast": True,
             "content": {
                 "state": self.state,
-                "role": self.role,
+                "paxos_state": self.paxos_state,
                 "position": self.position,
             }
         }
@@ -545,7 +502,7 @@ class Simulation:
             
             states = []
             for r in all_robots:
-                states.append(f"R{r.id}@{r.position}: {r.state}, role={r.role}, partner={r.carrying_with}, gold={r.holding_gold}, target={r.target_gold_pos}")
+                states.append(f"R{r.id}@{r.position}: {r.state}, partner={r.carrying_with}, gold={r.holding_gold}, target={r.target_gold_pos}, paxos={r.paxos_state}, backoff={r.proposal_backoff}")
             print(f"Robot details:")
             for s in states:
                 print(f"  {s}")
@@ -558,8 +515,8 @@ class Simulation:
                 print("\nAll gold has been deposited! Ending simulation.")
                 break
 
-            #if step < self.steps - 1:
-            #   time.sleep(0.15)
+            if step < self.steps - 1:
+               time.sleep(0.15)
             
             step += 1
         
@@ -611,26 +568,12 @@ class Simulation:
                 delivery_step = self.current_step + delay
                 self.delayed_messages.append((delivery_step, msg))
                 
-                # Optional: print debug info for finder-helper messages to see delays
-                if msg["type"] in ["found", "response", "ack", "here", "ack2"]:
+                # Optional: print debug info for Paxos messages to see delays
+                if msg["type"].startswith("paxos"):
                     print(f"DEBUG: {msg['type']} from R{msg['sender_id']} scheduled for step {delivery_step} (delay: {delay})")
 
     def _execute_actions(self, all_robots):
         """Execute robot actions and handle game mechanics"""
-        
-        # First, check for partners at same position and transition to ready_to_pickup
-        # This avoids relying on delayed state messages
-        for robot in all_robots:
-            if robot.state == "waiting_at_gold" and robot.carrying_with is not None:
-                partner = next((r for r in all_robots if r.id == robot.carrying_with), None)
-                if partner and partner.state == "waiting_at_gold":
-                    if robot.position == partner.position == robot.target_gold_pos:
-                        # Both at gold, ready to pickup
-                        robot.state = "ready_to_pickup"
-                        partner.state = "ready_to_pickup"
-                        robot.wait_timer = 0
-                        partner.wait_timer = 0
-                        print(f"DEBUG: R{robot.id} & R{partner.id} both ready at {robot.position}")
         
         # Group pickup attempts by position
         pickup_attempts = defaultdict(lambda: defaultdict(list))
@@ -697,12 +640,10 @@ class Simulation:
                         
                         robot.holding_gold = False
                         partner.holding_gold = False
+                        robot.state = "idle"
+                        partner.state = "idle"
                         robot.carrying_with = None
                         partner.carrying_with = None
-                        
-                        # Reset to exploring
-                        robot._reset_to_exploring()
-                        partner._reset_to_exploring()
                         
                         print(f"DEBUG: Gold dropped at {drop_pos} - partners separated")
         
@@ -719,14 +660,12 @@ class Simulation:
                         
                         robot.holding_gold = False
                         partner.holding_gold = False
+                        robot.state = "idle"
+                        partner.state = "idle"
                         robot.carrying_with = None
                         partner.carrying_with = None
                         robot.target_gold_pos = None
                         partner.target_gold_pos = None
-                        
-                        # Reset to exploring to find more gold
-                        robot._reset_to_exploring()
-                        partner._reset_to_exploring()
 
     def _print_grid(self):
         """Print a visual representation of the grid"""
