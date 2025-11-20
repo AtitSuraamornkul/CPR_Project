@@ -1,5 +1,9 @@
-import numpy as np
+"""
+Grid class for managing the simulation environment
+"""
 import random
+import numpy as np
+
 
 class Grid:
     def __init__(self, size=20, num_gold=30):

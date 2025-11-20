@@ -613,7 +613,7 @@ class Simulation:
                 break
 
             #if step < self.steps - 1:
-            #   time.sleep(0.15)
+             #  time.sleep(0.05)
             
             step += 1
         

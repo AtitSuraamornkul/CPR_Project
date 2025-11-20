@@ -48,7 +48,7 @@ class Grid:
                 if self.grid[x, y] == 0:  # Place gold only on empty cells
                     self.grid[x, y] = 1
                     break
-
+                    
     def get_cell(self, pos):
         x, y = pos
         if 0 <= x < self.size and 0 <= y < self.size:
@@ -515,8 +515,8 @@ class Simulation:
                 print("\nAll gold has been deposited! Ending simulation.")
                 break
 
-            if step < self.steps - 1:
-               time.sleep(0.15)
+            #if step < self.steps - 1:
+             #  time.sleep(0.15)
             
             step += 1
         

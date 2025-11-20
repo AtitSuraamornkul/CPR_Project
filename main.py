@@ -1,7 +1,12 @@
+"""
+Main entry point for the robot gold collection simulation
+"""
 import random
+
 from grid import Grid
 from robot import Robot
 from simulation import Simulation
+
 
 def main():
     # Initialize grid
@@ -29,6 +34,7 @@ def main():
     # Run simulation
     sim = Simulation(grid, group1, group2, steps=5000)
     sim.run()
+
 
 if __name__ == "__main__":
     main()
