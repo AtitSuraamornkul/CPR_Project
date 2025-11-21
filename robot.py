@@ -4,8 +4,6 @@ Robot class implementing the Finder-Helper protocol
 import random
 from typing import List, Tuple, Optional, Dict, Any
 
-
-# Finder-Helper Protocol (from new.md)
 # Messages: found, response, ack, here, ack2
 
 
@@ -65,13 +63,11 @@ class Robot:
         """Calculate visible positions based on direction"""
         visible = []
         x, y = self.position
-        # Coordinates are (row, col). Interpret directions as:
+
         # N: up (row-1), S: down (row+1), E: right (col+1), W: left (col-1)
         dir_map = {'N': (-1, 0), 'S': (1, 0), 'E': (0, 1), 'W': (0, -1)}
         dx, dy = dir_map[self.direction]
-        
-        # Perpendicular offsets: for vertical motion, vary columns; for
-        # horizontal motion, vary rows.
+
         if self.direction in ['N', 'S']:
             perp = [(0, 1), (0, -1)]  # right, left
         else:
@@ -95,11 +91,10 @@ class Robot:
     def observe(self, visible_cells: Dict[Tuple[int, int], int]):
         """Observe visible positions based on direction (3 front + 5 further)"""
         self.observed_gold = []
-        # We strictly use the passed visible_cells which contains the "slice" of reality
         visible_pos = self.get_visible_positions()
         
         for pos in visible_pos:
-            # Only record gold if it's in our provided view (it should be) and equals 1
+            # Only record gold if it's in our provided view and equals 1
             if pos in visible_cells and visible_cells[pos] == 1:
                 self.observed_gold.append(pos)
     
@@ -168,13 +163,13 @@ class Robot:
                         self.timeout_counter = 0
 
             elif msg_type == "ack":
-                # Helper receives ack from finder (selected!)
+                # Helper receives ack from finder
                 if self.role == 'helper' and self.state == "helper_waiting_ack":
                     helper_id = content.get("helper_id")
                     msg_index = content.get("index")
                     
                     if helper_id == self.id and msg_index == self.current_message_index:
-                        # I was selected!
+                        # I was selected
                         self.carrying_with = self.finder_id
                         self.state = "helper_moving_opposite"
                         self.timeout_counter = 0
@@ -222,11 +217,10 @@ class Robot:
             
             return self._get_move_action_towards(deposit)
         
-        # AT DEPOSIT - wait for partner to arrive and deposit together
+        # AT DEPOSIT 
         if self.state == "at_deposit":
-            # Check if we successfully deposited (simulation clears holding_gold and resets state)
             if not self.holding_gold:
-                # Deposit succeeded or gold was dropped by simulation
+            # Deposit succeeded or gold was dropped by simulation
                 return "idle"
             
             # Timeout after waiting too long at deposit
@@ -246,7 +240,7 @@ class Robot:
                 self.pickup_timer = 0
                 return "idle"
             
-            # Timeout if stuck (likely due to crowding - more than 2 robots at same location)
+            # Timeout if stuck 
             self.pickup_timer += 1
             if self.pickup_timer > 5:
                 print(f"DEBUG: R{self.id} timed out in ready_to_pickup (likely crowding), resetting")
@@ -269,7 +263,6 @@ class Robot:
                     return "idle"
 
             # Check if gold still exists (using local sensing)
-            # Since we are at the position, we can sense it directly (if passed in visible_cells)
             if self.position in visible_cells:
                  if not visible_cells[self.position] > 0:
                      self._reset_to_exploring()
@@ -459,12 +452,11 @@ class Robot:
         dx = target[0] - self.position[0]
         dy = target[1] - self.position[1]
         
-        # Coordinates are (row, col). Rows correspond to N/S, columns to E/W.
         if abs(dx) > abs(dy):
-            # Move mostly vertically
+        # Move mostly vertically
             desired = 'S' if dx > 0 else 'N'
         else:
-            # Move mostly horizontally
+        # Move mostly horizontally
             desired = 'E' if dy > 0 else 'W'
         
         if self.direction != desired:
@@ -506,14 +498,44 @@ class Robot:
             idx = dirs.index(self.direction)
             self.direction = dirs[(idx + 1) % 4]
     
-    def update(self, visible_cells: Dict[Tuple[int, int], int]):
+    def update(self, visible_cells: Dict[Tuple[int, int], int], physical_holding_gold: bool = False):
         """Main update loop: observe, process messages, decide, execute"""
         self.observe(visible_cells)
+        self._sense_physical_gold_state(physical_holding_gold)
         self.process_messages()
         action = self.decide_action(visible_cells)
         self.next_action = action
         self._broadcast_my_state()
 
+    def _sense_physical_gold_state(self, physical_holding_gold: bool):
+        """
+        Sense the physical state of gold carrying and update internal state accordingly.
+        This simulates proprioceptive sensing - the robot can feel whether it's actually carrying gold.
+        """
+        # Detect successful pickup
+        if physical_holding_gold and not self.holding_gold:
+            # Physics says we picked up gold, update belief
+            self.holding_gold = True
+            print(f"DEBUG: R{self.id} sensed successful pickup")
+        
+        # Detect gold drop or successful deposit
+        elif not physical_holding_gold and self.holding_gold:
+            
+            if self.state == "at_deposit":
+                # We were at deposit and gold disappeared - successful deposit!
+                print(f"DEBUG: R{self.id} sensed successful deposit")
+                self.holding_gold = False
+                self.carrying_with = None
+                self.target_gold_pos = None
+                self._reset_to_exploring()
+            else:
+                # Gold was dropped (partners separated)
+                print(f"DEBUG: R{self.id} sensed gold drop (partners separated)")
+                self.holding_gold = False
+                self.carrying_with = None
+                self.target_gold_pos = None
+                self._reset_to_exploring()
+    
     def _broadcast_my_state(self):
         """Broadcasts essential state to teammates."""
         state_message = {
